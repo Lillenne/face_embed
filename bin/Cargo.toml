@@ -1,0 +1,16 @@
+[package]
+name = "bin"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.80"
+face_embed = { path = "../face_embed" }
+image = "0.24.9"
+
+[dependencies.nokhwa]
+git = "https://github.com/l1npengtul/nokhwa.git"
+rev = "ea971242a888987222375189fb78c84fa85e5a4e"
+features = [ "input-native" ]
