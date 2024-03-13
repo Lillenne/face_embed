@@ -1,2 +1,3 @@
 [workspace]
 members = ["bin", "face_embed"]
+resolver = "2"

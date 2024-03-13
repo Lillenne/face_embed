@@ -1,9 +1,9 @@
 pub mod embedding;
 pub mod face_detector;
 
+pub(crate) use std::num::NonZeroU32;
 pub use fast_image_resize as fr;
 use fr::DynamicImageView;
-use std::num::NonZeroU32;
 
 pub fn resize(buffer: &[u8], src_w: NonZeroU32, src_h: NonZeroU32, w: NonZeroU32, h: NonZeroU32, alg: fr::ResizeAlg) -> anyhow::Result<fr::Image> {
     let src_view = DynamicImageView::U8x3(fr::ImageView::from_buffer(src_w, src_h, buffer)?);
@@ -23,10 +23,11 @@ pub fn crop_and_resize<'a>(
     if crop.width > image.width().get() as f64 || crop.height > image.height().get() as f64 {
         return Err(anyhow::anyhow!("Resize cropbox bigger than image"))
     }
-    let mut dst_image = fr::Image::new(w, h, image.pixel_type());
     image.set_crop_box(crop)?;
+    let mut dst_image = fr::Image::new(w, h, image.pixel_type());
+    let mut dst_view = dst_image.view_mut();
     let mut resizer = fr::Resizer::new(alg);
-    resizer.resize(image, &mut dst_image.view_mut())?;
+    resizer.resize(image, &mut dst_view)?;
     Ok(dst_image)
 }
 
@@ -103,8 +104,8 @@ impl Rect {
     pub fn to_crop_box(&self, w: u32, h: u32) -> fr::CropBox {
         let left = (self.left * w as f32) as f64;
         let top = (self.top * h as f32) as f64;
-        let width = (self.width * w as f32) as f64;
-        let height = (self.height * h as f32) as f64;
+        let width = (self.width * w as f32).clamp(1.0, (w as f64 - left) as f32) as f64;
+        let height = (self.height * h as f32).clamp(1.0, (h as f64 - top) as f32) as f64;
         fr::CropBox {left, top, width, height}
     }
 }
