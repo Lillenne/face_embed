@@ -166,8 +166,9 @@ async fn spawn_embedder_thread(
         }
 
         let embedding = pgvector::Vector::from(embedding);
-        sqlx::query("INSERT INTO items (embedding) VALUES ($1)")
+        sqlx::query("INSERT INTO items (embedding, time, class_id) VALUES ($1, $2, NULL)")
             .bind(embedding)
+            .bind(chrono::Utc::now())
             .execute(&pool)
             .await?;
     }

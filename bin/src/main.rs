@@ -5,14 +5,14 @@ use std::sync::atomic;
 
 use clap::{arg, Parser, Subcommand, Args};
 use face_embed::{embedding::*, face_detector::*, *};
-use image::EncodableLayout;
-use pgvector::Vector;
+use pgvector::*;
 use signal_hook::consts::*;
 use signal_hook_tokio::{Signals, Handle};
 
 use futures_util::stream::StreamExt;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{Pool, Postgres, Row};
+use sqlx::types::chrono;
+use sqlx::{Pool, Postgres, Row, FromRow};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -20,7 +20,6 @@ use crate::embed::detect;
 
 mod embed;
 mod visualize;
-mod from_file;
 
 // Defaults
 const ARCFACE_PATH: &str = "./models/arcface.onnx";
@@ -152,11 +151,12 @@ pub(crate) struct Source {
     glob: Option<String>,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(FromRow, Debug)]
 pub(crate) struct EmbeddingData {
-    pub id: u32,
-    pub embedding: pgvector::Vector,
-    pub class_idx: u32
+    pub id: i64,
+    pub embedding: Vector,
+    pub time: chrono::DateTime<chrono::Utc>,
+    pub class_idx: i64
 }
 
 pub(crate) fn path_parser(path: &str) -> anyhow::Result<String> {
@@ -196,7 +196,9 @@ async fn setup_sqlx(conn: &str, table: &str) -> anyhow::Result<Pool<Postgres>> {
     sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
         .execute(&pool)
         .await?;
-    let query = format!("CREATE TABLE IF NOT EXISTS {} (id bigserial PRIMARY KEY, embedding vector(512))", table);
+    let query = "CREATE TABLE IF NOT EXISTS classes (id bigserial PRIMARY KEY, name varchar(40))";
+    sqlx::query(query).execute(&pool).await?;
+    let query = format!("CREATE TABLE IF NOT EXISTS {} (id BIGSERIAL PRIMARY KEY, embedding VECTOR(512) NOT NULL, time TIMESTAMPTZ NOT NULL, class_id BIGINT REFERENCES classes(id) NULL)", table);
     sqlx::query(query.as_str())
         .execute(&pool)
         .await?;
