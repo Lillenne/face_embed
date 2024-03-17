@@ -102,7 +102,7 @@ pub(crate) struct EmbedArgs {
 pub(crate) struct VisualizeArgs {
 
     /// The output path for the output PNG.
-    #[arg(short, long, value_parser = crate::path_parser)]
+    #[arg(short, long, value_parser = expand_path)]
     output_path: String,
 
     #[arg(short, long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=3))]
@@ -111,14 +111,21 @@ pub(crate) struct VisualizeArgs {
     #[arg(short, long, default_value_t = 5000)]
     limit: usize,
 
+    #[command(flatten)]
+    alg: ReductionAlg,
+
+    #[command(flatten)]
+    database: DatabaseArgs
+}
+
+#[derive(Args, Debug)]
+#[group(required = true, multiple = false)]
+struct ReductionAlg {
     #[arg(long, group = "dim_reduc")]
     pca: bool,
 
     #[arg(long, group = "dim_reduc")]
     tsne: bool,
-
-    #[command(flatten)]
-    database: DatabaseArgs
 }
 
 #[derive(Args, Debug)]
@@ -156,10 +163,10 @@ pub(crate) struct EmbeddingData {
     pub id: i64,
     pub embedding: Vector,
     pub time: chrono::DateTime<chrono::Utc>,
-    pub class_idx: i64
+    pub class_id: Option<i64>
 }
 
-pub(crate) fn path_parser(path: &str) -> anyhow::Result<String> {
+fn expand_path(path: &str) -> anyhow::Result<String> {
     let path = Path::new(path);
     if path.is_relative() {
         let cwd = std::env::current_dir()?;
@@ -170,20 +177,26 @@ pub(crate) fn path_parser(path: &str) -> anyhow::Result<String> {
             if let Some(str) = path.as_os_str().to_str() {
                 Ok(str.into())
             } else {
-                Err(anyhow::anyhow!("Failed to get relative path"))
+                Err(anyhow::anyhow!("Failed to get relative path: {:?}", path))
             }
         }
         else {
             Err(anyhow::anyhow!("Failed to get relative path"))
         }
-    } else if path.exists() {
+    } else {
         if let Some(str) = path.to_str() {
             Ok(str.to_string())
         } else {
             Err(anyhow::anyhow!("Path contains invalid characters"))
         }
     }
-    else {
+}
+
+fn path_parser(path: &str) -> anyhow::Result<String> {
+    let path = expand_path(path)?;
+    if Path::new(path.as_str()).exists() {
+        Ok(path)
+    } else {
         Err(anyhow::anyhow!("Path does not exist!"))
     }
 }
