@@ -71,7 +71,7 @@ impl EmbeddingGenerator for ArcFace {
     }
 }
 
-pub fn similarity(embedding: &[f32], nearest_embed: &[f32]) -> f32 {
+pub fn similarity<T: num_traits::Float>(embedding: &[T], nearest_embed: &[T]) -> T {
     embedding.iter().zip(nearest_embed.iter()).map(|(a,b)| *a * *b).reduce(|a,b| a + b).unwrap()
 }
 

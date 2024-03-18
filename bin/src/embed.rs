@@ -1,12 +1,18 @@
 pub(crate) use std::num::NonZeroU32;
+use std::time::Duration;
 
+use rayon::prelude::*;
 use nokhwa::{Camera, pixel_format::RgbFormat, utils::{RequestedFormat, CameraIndex, CameraFormat, Resolution}};
+use sqlx::{QueryBuilder, types::chrono::{Utc, DateTime}};
 use tokio::sync::mpsc::Sender;
+use crate::cache::SlidingVectorCache;
 
 use crate::*;
 
+type FaceTimeStamp = (Vec<u8>, chrono::DateTime<chrono::Utc>);
+
 pub(crate) async fn detect(args: DetectArgs, v: bool) -> anyhow::Result<()> {
-    Ok(())
+    todo!();
 }
 
 pub(crate) async fn embed(args: EmbedArgs, v: bool) -> anyhow::Result<()> {
@@ -20,10 +26,10 @@ pub(crate) async fn embed(args: EmbedArgs, v: bool) -> anyhow::Result<()> {
 
     let det = create_face_detector(&args.ultraface_path)?;
 
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(10000);
+    let (tx, rx) = mpsc::channel::<>(10000);
     let pool = pool_task.await?;
     let embed_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-        spawn_embedder_thread(rx, arcface, pool, v).await?;
+        spawn_embedder_thread(rx, arcface, pool, args.database.table_name, std::time::Duration::from_secs(60 * 60 * 2 /* 2 hr */), args.similarity_threshold, v).await?;
         Ok(())
     });
 
@@ -38,7 +44,7 @@ pub(crate) async fn embed(args: EmbedArgs, v: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn process_feed(src_x: u32, src_y: u32, src_fps: u32, tx: Sender<Vec<u8>>, det: impl FaceDetector, emb_x: NonZeroU32, emb_y: NonZeroU32, v: bool) -> anyhow::Result<()> {
+async fn process_feed(src_x: u32, src_y: u32, src_fps: u32, tx: Sender<FaceTimeStamp>, det: impl FaceDetector, emb_x: NonZeroU32, emb_y: NonZeroU32, v: bool) -> anyhow::Result<()> {
     let (mut cam, x, y) = get_cam(src_x, src_y, src_fps, v)?;
     let mut buffer: Vec<u8> = vec![0; (y.get() * x.get() * 3) as usize];
 
@@ -59,7 +65,7 @@ async fn process_feed(src_x: u32, src_y: u32, src_fps: u32, tx: Sender<Vec<u8>>,
     Ok(())
 }
 
-async fn embed_files(glob: String, tx: Sender<Vec<u8>>, det: impl FaceDetector, emb_x: NonZeroU32, emb_y: NonZeroU32, v: bool) -> anyhow::Result<()> {
+async fn embed_files(glob: String, tx: Sender<FaceTimeStamp>, det: impl FaceDetector, emb_x: NonZeroU32, emb_y: NonZeroU32, v: bool) -> anyhow::Result<()> {
     for path in glob::glob(glob.as_str())? {
         if SHUTDOWN_REQUESTED.load(atomic::Ordering::Acquire) {
             break;
@@ -91,7 +97,7 @@ async fn embed_files(glob: String, tx: Sender<Vec<u8>>, det: impl FaceDetector, 
 }
 
 async fn embed_frame(
-    tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    tx: &tokio::sync::mpsc::Sender<FaceTimeStamp>,
     buffer: &mut [u8],
     det: &impl FaceDetector,
     x: NonZeroU32,
@@ -99,6 +105,7 @@ async fn embed_frame(
     emb_x: NonZeroU32,
     emb_y: NonZeroU32,
     v: bool) -> anyhow::Result<()> {
+    let time = chrono::Utc::now();
     let det_dims = det.dims();
     // resize image for model
     let img = resize(
@@ -114,7 +121,6 @@ async fn embed_frame(
     if faces.len() == 0 {
         return Ok(());
     }
-    if v { println!("Detected {} face(s)", faces.len())}
     for face in faces {
         let crop = face.bounding_box.to_crop_box(x.get(), y.get());
         let region =
@@ -127,7 +133,7 @@ async fn embed_frame(
             fr::ResizeAlg::Convolution(fr::FilterType::Mitchell),
         )?
         .into_vec();
-        if let Err(_) = tx.send(roi).await {
+        if let Err(_) = tx.send((roi, time)).await {
             // Likely shutdown requested or queue full. Return to beginning of loop for shutdown code & drop this frame's outputs
             break;
         }
@@ -137,40 +143,56 @@ async fn embed_frame(
 
 /// Spin up a thread to generate embeddings from face crops
 async fn spawn_embedder_thread(
-    mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    model: Box<dyn EmbeddingGenerator + Send>,
+    mut rx: tokio::sync::mpsc::Receiver<FaceTimeStamp>,
+    model: Box<dyn EmbeddingGenerator + Send + Sync>,
     pool: Pool<Postgres>,
+    table_name: String,
+    cache_duration: Duration,
+    similarity_threshold: f32,
     v: bool
 ) -> anyhow::Result<()> {
-    while let Some(face) = rx.recv().await {
+    let mut buf: Vec<FaceTimeStamp> = vec!();
+    let mut cache = SlidingVectorCache::new(cache_duration, similarity_threshold);
+    loop {
+        let n_rec = rx.recv_many(&mut buf, 300).await;
+        if n_rec == 0 {
+            break
+        }
         if SHUTDOWN_REQUESTED.load(atomic::Ordering::Relaxed) {
-            break;
-        }
-        let t = std::time::Instant::now();
-        let embedding = model.generate_embedding(face.as_slice())?;
-        let embedding_vec = pgvector::Vector::from(embedding.clone()); // copy to send to postgres
-        if v { println!("Calculated embedding in {} ms", t.elapsed().as_millis()); }
-
-        // Get nearest neighbor from DB and calculate similarity
-        let nearest = sqlx::query("SELECT * FROM items ORDER BY embedding <-> $1 LIMIT 1")
-            .bind(embedding_vec)
-            .fetch_all(&pool)
-            .await?;
-        if let Some(n) = nearest.get(0) {
-            let nearest_embed: Vector = n.try_get("embedding")?;
-            let similarity = similarity(embedding.as_slice(), nearest_embed.as_slice());
-            if similarity > 0.3 {
-                // TODO publish event, get id
-                println!("Similarity: {}", similarity);
-            }
+            rx.close();
         }
 
-        let embedding = pgvector::Vector::from(embedding);
-        sqlx::query("INSERT INTO items (embedding, time, class_id) VALUES ($1, $2, NULL)")
-            .bind(embedding)
-            .bind(chrono::Utc::now())
-            .execute(&pool)
-            .await?;
+        let embeddings: Vec<_> = buf.par_iter()
+            .map(|(face, time)| {
+                let embedding = model.generate_embedding(face.as_slice())?;
+                let embedding_vec = pgvector::Vector::from(embedding);
+                let item = EmbeddingTime {
+                    embedding: embedding_vec,
+                    time: time.clone(),
+                };
+                Ok::<EmbeddingTime, anyhow::Error>(item)
+            })
+            .flatten()
+            .collect();
+
+        let new = embeddings
+            .into_iter()
+            .filter(|et| cache.push(std::time::Instant::now(), et))
+            .collect::<Vec<_>>();
+        if new.len() > 0 {
+            if v { println!("Detected {} new face(s)", new.len()); }
+            // Push
+            let query_init = format!("INSERT INTO {} (embedding, time)", table_name);
+            let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(query_init);
+            qb.push_values(new, |mut b, et| {
+                b.push_bind(et.embedding).push_bind(et.time);
+            });
+            qb.build()
+                .execute(&pool)
+                .await?;
+        }
+
+        buf.clear();
     }
     if v { println!("Embedding calculations complete."); }
     Ok(())
@@ -199,4 +221,16 @@ fn get_cam(x: u32, y: u32, fps: u32, v: bool) -> anyhow::Result<(Camera, NonZero
     cam.open_stream()?;
     if v { println!("Setup camera with resolution ({}, {}) at {} fps.", x.get(), y.get(), cam.frame_rate()); }
     Ok((cam, x, y))
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingTime {
+    pub embedding: Vector,
+    pub time: chrono::DateTime<chrono::Utc>,
+}
+
+impl EmbeddingRef<f32> for EmbeddingTime {
+    fn embedding_ref(&self) -> &[f32] {
+        self.embedding.as_slice()
+    }
 }

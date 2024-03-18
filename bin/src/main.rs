@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::atomic;
 
 use clap::{arg, Parser, Subcommand, Args};
+use face_embed::cache::EmbeddingRef;
 use face_embed::{embedding::*, face_detector::*, *};
 use pgvector::*;
 use signal_hook::consts::*;
@@ -91,6 +92,9 @@ pub(crate) struct EmbedArgs {
     #[arg(short, long, default_value = ARCFACE_PATH, value_parser = crate::path_parser)]
     arcface_path: String,
 
+    #[arg(short, long, default_value_t = 0.5)]
+    similarity_threshold: f32,
+
     #[command(flatten)]
     source: Source,
 
@@ -158,7 +162,7 @@ pub(crate) struct Source {
     glob: Option<String>,
 }
 
-#[derive(FromRow, Debug)]
+#[derive(FromRow, Debug, Clone)]
 pub(crate) struct EmbeddingData {
     pub id: i64,
     pub embedding: Vector,

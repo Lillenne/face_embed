@@ -1,5 +1,6 @@
 pub mod embedding;
 pub mod face_detector;
+pub mod cache;
 
 pub(crate) use std::num::NonZeroU32;
 pub use fast_image_resize as fr;
