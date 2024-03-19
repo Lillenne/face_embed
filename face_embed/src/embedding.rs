@@ -82,6 +82,7 @@ mod tests {
     use fast_image_resize as fr;
     use crate::embedding::{ArcFace, EmbeddingGenerator};
     use crate::face_detector::*;
+    use crate::image_utils::{resize, crop_and_resize};
     use super::similarity;
 
     const ARCFACE_PATH: &str = "../models/arcface.onnx";
@@ -123,7 +124,7 @@ mod tests {
         let rgb = a_in.as_rgb8().expect("Expected rgb8 image");
         let x = NonZeroU32::new(rgb.width()).expect("Zero width");
         let y = NonZeroU32::new(rgb.height()).expect("Zero height");
-        let img = crate::resize(
+        let img = resize(
             rgb.as_bytes(),
             x,
             y,
@@ -136,7 +137,7 @@ mod tests {
         let mut vec = rgb.clone().into_vec();
         let slice = vec.as_mut_slice();
         let region = fr::Image::from_slice_u8(x, y, slice, fr::PixelType::U8x3)?;
-        let roi = crate::crop_and_resize(
+        let roi = crop_and_resize(
             &mut (region.view()),
             embedding_dims.3,
             embedding_dims.2,

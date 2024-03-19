@@ -1,29 +1,67 @@
 use std::str::FromStr;
 
-use crate::{VisualizeArgs, DatabaseArgs};
+use crate::DatabaseArgs;
+use clap::Args;
+use face_embed::{db::create_pool_if_table_exists, path_utils::expand_path};
 use linfa::{Dataset, traits::{Transformer, Fit}, DatasetBase};
+use linfa_preprocessing::linear_scaling::LinearScaler;
 use linfa_reduction::Pca;
 use linfa_tsne::TSneParams;
 use ndarray::{Axis, OwnedRepr, ArrayBase, Dim};
 use pgvector::Vector;
 use plotters::prelude::*;
-use sqlx::{Postgres, Pool, postgres::PgPoolOptions, Row};
+use sqlx::Row;
 
 type DS = DatasetBase<ArrayBase<OwnedRepr<f64>, Dim<[usize; 2]>>, ArrayBase<OwnedRepr<f64>, Dim<[usize; 1]>>>;
 
-pub(crate) async fn visualize(args: VisualizeArgs, v: bool) -> anyhow::Result<()> {
+#[derive(Args, Debug)]
+pub(crate) struct VisualizeArgs {
+
+    /// The output path for the output PNG.
+    #[arg(short, long, value_parser = expand_path)]
+    output_path: String,
+
+    #[arg(short, long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=3))]
+    dimensions: u8,
+
+    #[arg(short, long, default_value_t = 5000)]
+    limit: usize,
+
+    #[command(flatten)]
+    alg: ReductionAlg,
+
+    #[command(flatten)]
+    database: DatabaseArgs,
+
+    #[arg(short, long)]
+    verbose: bool
+}
+
+#[derive(Args, Debug)]
+#[group(required = true, multiple = false)]
+struct ReductionAlg {
+    #[arg(long, group = "dim_reduc")]
+    pca: bool,
+
+    #[arg(long, group = "dim_reduc")]
+    tsne: bool,
+}
+
+pub(crate) async fn visualize(args: VisualizeArgs) -> anyhow::Result<()> {
+    let v = args.verbose;
     if v { println!("Generating dataset...") }
     let ds = create_dataset(&args).await?;
     if v { println!("Clustering dataset...") }
-    let mut clustered = reduce_dims(&args, ds)?;
-    normalize(&mut clustered);
+    let clustered = reduce_dims(&args, ds)?;
+    if v { println!("Normalizing dataset...") }
+    let clustered = LinearScaler::min_max() .fit(&clustered)?.transform(clustered);
     if v { println!("Plotting...") }
-    plot(args, &mut clustered)?;
+    plot(args, &clustered)?;
     if v { println!("Complete.") }
     Ok(())
 }
 
-fn plot(args: VisualizeArgs, clustered: &mut DS) -> anyhow::Result<()> {
+fn plot(args: VisualizeArgs, clustered: &DS) -> anyhow::Result<()> {
     let path = if args.output_path.ends_with("png") {
         args.output_path
     } else {
@@ -68,48 +106,8 @@ fn plot(args: VisualizeArgs, clustered: &mut DS) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn query_sqlx(args: &DatabaseArgs) -> anyhow::Result<Pool<Postgres>> {
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&args.conn_str)
-        .await?;
-    let exists_query = format!("SELECT EXISTS (
-    SELECT FROM
-        pg_tables
-    WHERE
-        schemaname = 'public' AND
-        tablename  = '{}'
-    );", args.table_name);
-    if let Some(_) = sqlx::query(&exists_query)
-        .fetch_optional(&pool)
-        .await? {
-            Ok(pool)
-        } else {
-            Err(anyhow::anyhow!("Table not created"))
-        }
-}
-
-fn normalize(clustered: &mut DS) {
-    let maxes = clustered.records.axis_iter(Axis(1)).map(|a| {
-        let (mut min, mut max) = (f64::MAX, f64::MIN);
-        for v in a {
-            min = v.min(min);
-            max = v.max(max);
-        }
-        (min, max)
-    }).collect::<Vec<(f64, f64)>>();
-
-    let mut idx: usize = 0;
-    for ax in clustered.records.axis_iter_mut(Axis(1)) {
-        for v in ax {
-            *v = (*v - maxes[idx].0) / (maxes[idx].1 - maxes[idx].0);
-        }
-        idx += 1;
-    }
-}
-
 async fn create_dataset(args: &VisualizeArgs) -> anyhow::Result<DS> {
-    let pool = query_sqlx(&args.database).await?;
+    let pool = create_pool_if_table_exists(&args.database.conn_str, 5, &args.database.table_name).await?;
     let query = format!("
     SELECT class_id, embedding
     FROM {}

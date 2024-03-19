@@ -1,35 +1,68 @@
 pub(crate) use std::num::NonZeroU32;
 use std::time::Duration;
 
+use face_embed::{path_utils::path_parser, db::{setup_sqlx, EmbeddingTime, insert_captures}, messaging::create_queue, image_utils::{resize, crop_and_resize}};
+use lapin::{options::BasicPublishOptions, Channel, BasicProperties};
 use rayon::prelude::*;
 use nokhwa::{Camera, pixel_format::RgbFormat, utils::{RequestedFormat, CameraIndex, CameraFormat, Resolution}};
-use sqlx::{QueryBuilder, types::chrono::{Utc, DateTime}};
 use tokio::sync::mpsc::Sender;
+use fast_image_resize as fr;
 use crate::cache::SlidingVectorCache;
 
 use crate::*;
 
 type FaceTimeStamp = (Vec<u8>, chrono::DateTime<chrono::Utc>);
 
-pub(crate) async fn detect(args: DetectArgs, v: bool) -> anyhow::Result<()> {
-    todo!();
+#[derive(Args, Debug)]
+pub(crate) struct EmbedArgs {
+    /// The path to the ultraface detection model.
+    #[arg(short, long, default_value = ULTRAFACE_PATH, value_parser = path_parser)]
+    ultraface_path: String,
+
+    /// The path to the arface embedding model.
+    #[arg(short, long, default_value = ARCFACE_PATH, value_parser = path_parser)]
+    arcface_path: String,
+
+    #[arg(short, long, default_value_t = 0.5)]
+    similarity_threshold: f32,
+
+    #[command(flatten)]
+    source: Source,
+
+    #[command(flatten)]
+    database: DatabaseArgs,
+
+    #[command(flatten)]
+    message_bus: MessageBusArgs,
+
+    #[arg(short, long)]
+    verbose: bool
 }
 
-pub(crate) async fn embed(args: EmbedArgs, v: bool) -> anyhow::Result<()> {
+pub(crate) async fn embed(args: EmbedArgs) -> anyhow::Result<()> {
+    let v = args.verbose;
     let (s_handle, s_task) = setup_signal_handlers()?;
-    let pool_task = setup_sqlx(args.database.conn_str.as_str(), args.database.table_name.as_str());
+    let pool_task = setup_sqlx(args.database.conn_str.as_str(), 5, args.database.table_name.as_str());
+    let ch_task = create_queue(&args.message_bus.address, &args.message_bus.queue_name);
 
     if v { println!("Generating embedding model..."); }
     let arcface = Box::new(ArcFace::new(args.arcface_path.as_str())?);
     let embedding_dims = arcface.dims();
     if v { println!("Embedding model generated."); }
 
-    let det = create_face_detector(&args.ultraface_path)?;
+    println!("Generating face detection model...");
+    let uf_cfg = UltrafaceDetectorConfig {
+        top_k: NonZeroU32::new(3).unwrap(),
+        ..Default::default()
+    };
+    let det = UltrafaceDetector::new(uf_cfg, &args.ultraface_path)?;
+    println!("Face detection model generated.");
 
-    let (tx, rx) = mpsc::channel::<>(10000);
+    let (tx, rx) = mpsc::channel(10000);
     let pool = pool_task.await?;
+    let ch = ch_task.await?;
     let embed_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-        spawn_embedder_thread(rx, arcface, pool, args.database.table_name, std::time::Duration::from_secs(60 * 60 * 2 /* 2 hr */), args.similarity_threshold, v).await?;
+        spawn_embedder_thread(rx, arcface, pool, args.database.table_name, std::time::Duration::from_secs(60 * 60 * 2 /* 2 hr */), args.similarity_threshold, ch, &args.message_bus.queue_name, v).await?;
         Ok(())
     });
 
@@ -59,8 +92,7 @@ async fn process_feed(src_x: u32, src_y: u32, src_fps: u32, tx: Sender<FaceTimeS
             x,
             y,
             emb_x,
-            emb_y,
-            v).await?;
+            emb_y).await?;
     }
     Ok(())
 }
@@ -84,8 +116,7 @@ async fn embed_files(glob: String, tx: Sender<FaceTimeStamp>, det: impl FaceDete
                     x,
                     y,
                     emb_x,
-                    emb_y,
-                    v).await?;
+                    emb_y).await?;
             },
             Err(e) => {
                 if v { println!("Failed to process file: {:?}", e) }
@@ -103,8 +134,7 @@ async fn embed_frame(
     x: NonZeroU32,
     y: NonZeroU32,
     emb_x: NonZeroU32,
-    emb_y: NonZeroU32,
-    v: bool) -> anyhow::Result<()> {
+    emb_y: NonZeroU32) -> anyhow::Result<()> {
     let time = chrono::Utc::now();
     let det_dims = det.dims();
     // resize image for model
@@ -125,7 +155,7 @@ async fn embed_frame(
         let crop = face.bounding_box.to_crop_box(x.get(), y.get());
         let region =
             fr::Image::from_slice_u8(x, y, buffer, fr::PixelType::U8x3).unwrap();
-        let roi = face_embed::crop_and_resize(
+        let roi = crop_and_resize(
             &mut (region.view()),
             emb_x,
             emb_y,
@@ -149,19 +179,17 @@ async fn spawn_embedder_thread(
     table_name: String,
     cache_duration: Duration,
     similarity_threshold: f32,
+    channel: Channel,
+    route: &str,
     v: bool
 ) -> anyhow::Result<()> {
     let mut buf: Vec<FaceTimeStamp> = vec!();
     let mut cache = SlidingVectorCache::new(cache_duration, similarity_threshold);
     loop {
-        let n_rec = rx.recv_many(&mut buf, 300).await;
-        if n_rec == 0 {
+        let n_rec = rx.recv_many(&mut buf, 40).await;
+        if n_rec == 0 || SHUTDOWN_REQUESTED.load(atomic::Ordering::Relaxed) {
             break
         }
-        if SHUTDOWN_REQUESTED.load(atomic::Ordering::Relaxed) {
-            rx.close();
-        }
-
         let embeddings: Vec<_> = buf.par_iter()
             .map(|(face, time)| {
                 let embedding = model.generate_embedding(face.as_slice())?;
@@ -174,25 +202,33 @@ async fn spawn_embedder_thread(
             })
             .flatten()
             .collect();
+        buf.clear();
 
         let new = embeddings
             .into_iter()
             .filter(|et| cache.push(std::time::Instant::now(), et))
             .collect::<Vec<_>>();
-        if new.len() > 0 {
-            if v { println!("Detected {} new face(s)", new.len()); }
-            // Push
-            let query_init = format!("INSERT INTO {} (embedding, time)", table_name);
-            let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(query_init);
-            qb.push_values(new, |mut b, et| {
-                b.push_bind(et.embedding).push_bind(et.time);
-            });
-            qb.build()
-                .execute(&pool)
-                .await?;
-        }
+        if new.len() == 0 { continue }
+        if v { println!("Detected {} new face(s)", new.len()); }
 
-        buf.clear();
+        let cp = new.clone();
+        insert_captures(new, &pool, &table_name).await?;
+
+        for item in cp {
+            let payload = item.time.to_string();
+            println!("Publishing with payload {}", &payload);
+            _ = channel
+                .basic_publish(
+                    "",
+                    route,
+                    BasicPublishOptions::default(),
+                    payload.as_bytes(),
+                    BasicProperties::default(),
+                )
+                .await?
+                .await?;
+            println!("Published")
+        }
     }
     if v { println!("Embedding calculations complete."); }
     Ok(())
@@ -221,16 +257,4 @@ fn get_cam(x: u32, y: u32, fps: u32, v: bool) -> anyhow::Result<(Camera, NonZero
     cam.open_stream()?;
     if v { println!("Setup camera with resolution ({}, {}) at {} fps.", x.get(), y.get(), cam.frame_rate()); }
     Ok((cam, x, y))
-}
-
-#[derive(Debug, Clone)]
-struct EmbeddingTime {
-    pub embedding: Vector,
-    pub time: chrono::DateTime<chrono::Utc>,
-}
-
-impl EmbeddingRef<f32> for EmbeddingTime {
-    fn embedding_ref(&self) -> &[f32] {
-        self.embedding.as_slice()
-    }
 }

@@ -17,8 +17,9 @@ flowchart
 ```
 
 ## Roadmap
-- [ ] Limit data generation (_e.g._, do not publish similar embeddings in a given time frame)
-- [ ] Add publishing to RabbitMQ message bus
+- [x] Limit data generation (_e.g._, do not publish similar embeddings in a given time frame)
+- [-] Add publishing to RabbitMQ message bus
+- [ ] Benchmark ort (vs tract) with quantized models & switch if appropriate 
 - [ ] Move data visualization to a separate binary
 - [ ] Generate Docker Compose and/or Helm charts for Postgresql w/ Vector, application, and RabbitMQ
 - [ ] Improve startup and shutdown robustness (Nokhwa crate often has issues with initial webcam setup and rude shutdown)
