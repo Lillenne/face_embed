@@ -5,6 +5,7 @@ use face_embed::{path_utils::path_parser, db::{setup_sqlx, EmbeddingTime, insert
 use lapin::{options::BasicPublishOptions, Channel, BasicProperties};
 use rayon::prelude::*;
 use nokhwa::{Camera, pixel_format::RgbFormat, utils::{RequestedFormat, CameraIndex, CameraFormat, Resolution}};
+use sqlx::types::chrono::{DateTime, Utc};
 use tokio::sync::mpsc::Sender;
 use fast_image_resize as fr;
 use crate::cache::SlidingVectorCache;
@@ -35,6 +36,12 @@ pub(crate) struct EmbedArgs {
     #[command(flatten)]
     message_bus: MessageBusArgs,
 
+    #[arg(long, default_value_t = 60 * 60 * 2 /* 2 hr */)]
+    cache_duration_seconds: u64,
+
+    #[arg(long, default_value_t = 1000)]
+    channel_bound: usize,
+
     #[arg(short, long)]
     verbose: bool
 }
@@ -58,11 +65,11 @@ pub(crate) async fn embed(args: EmbedArgs) -> anyhow::Result<()> {
     let det = UltrafaceDetector::new(uf_cfg, &args.ultraface_path)?;
     println!("Face detection model generated.");
 
-    let (tx, rx) = mpsc::channel(10000);
+    let (tx, rx) = mpsc::channel(args.channel_bound);
     let pool = pool_task.await?;
     let ch = ch_task.await?;
     let embed_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-        spawn_embedder_thread(rx, arcface, pool, args.database.table_name, std::time::Duration::from_secs(60 * 60 * 2 /* 2 hr */), args.similarity_threshold, ch, &args.message_bus.queue_name, v).await?;
+        spawn_embedder_thread(rx, arcface, pool, args.database.table_name, std::time::Duration::from_secs(args.cache_duration_seconds), args.similarity_threshold, ch, &args.message_bus.queue_name, v).await?;
         Ok(())
     });
 
@@ -211,12 +218,12 @@ async fn spawn_embedder_thread(
         if new.len() == 0 { continue }
         if v { println!("Detected {} new face(s)", new.len()); }
 
-        let cp = new.clone();
-        insert_captures(new, &pool, &table_name).await?;
+        // TODO outbox pattern or similar
+        let times: Vec<DateTime<Utc>> = new.iter().map(|et| et.time.clone()).collect();
+        let ids = insert_captures(new, &pool, &table_name).await?;
 
-        for item in cp {
-            let payload = item.time.to_string();
-            println!("Publishing with payload {}", &payload);
+        for (time, id) in times.into_iter().zip(ids) {
+            let payload = format!("{{ id: {}, time: {} }}", id, time);
             _ = channel
                 .basic_publish(
                     "",
@@ -227,7 +234,6 @@ async fn spawn_embedder_thread(
                 )
                 .await?
                 .await?;
-            println!("Published")
         }
     }
     if v { println!("Embedding calculations complete."); }

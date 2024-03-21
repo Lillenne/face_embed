@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
 
 #[derive(Parser, Debug)]
-#[command(name = "faces", version, about, next_line_help = true)]
+#[command(name = "faces", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
