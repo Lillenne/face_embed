@@ -26,6 +26,10 @@ const POSTGRES_CONN_STR: &str = "postgres://postgres:postgres@localhost:5432";
 const TABLE_NAME: &str = "items";
 const RABBITMQ_DEFAULT_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
 const RABBITMQ_DEFAULT_QUEUE: &str = "embed-events";
+const OBJECT_STORAGE_DEFAULT_URL: &str = "http://127.0.0.1:9000";
+const OBJECT_STORAGE_DEFAULT_ACCESS_KEY: &str = "minioadmin";
+const OBJECT_STORAGE_DEFAULT_SECRET_KEY: &str = "minioadmin";
+const OBJECT_STORAGE_DEFAULT_BUCKET: &str = "feed";
 
 // Global shutdown
 pub(crate) static SHUTDOWN_REQUESTED: atomic::AtomicBool = atomic::AtomicBool::new(false);
@@ -81,6 +85,21 @@ pub(crate) struct DatabaseArgs {
     #[arg(short, long, default_value = TABLE_NAME)]
     /// The table name in the postgresql database.
     table_name: String,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct S3Args {
+    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_URL)]
+    url: String,
+
+    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_ACCESS_KEY)]
+    access_key: String,
+
+    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_SECRET_KEY)]
+    secret_key: String,
+
+    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_BUCKET)]
+    bucket: String
 }
 
 #[derive(Args, Debug)]

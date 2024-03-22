@@ -5,6 +5,7 @@ pub mod db;
 pub mod messaging;
 pub mod path_utils;
 pub mod image_utils;
+pub mod storage;
 use fast_image_resize as fr;
 
 #[derive(Clone, Copy, Debug)]

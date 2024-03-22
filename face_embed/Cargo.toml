@@ -25,6 +25,9 @@ rayon = "1.9.0"
 lapin = "2.3.1"
 linfa-preprocessing = "0.7.0"
 
+[dependencies.rust-s3]
+git = "https://github.com/durch/rust-s3.git"
+
 [dependencies.nokhwa]
 git = "https://github.com/l1npengtul/nokhwa.git"
 rev = "ea971242a888987222375189fb78c84fa85e5a4e"

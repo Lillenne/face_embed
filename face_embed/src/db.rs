@@ -61,7 +61,7 @@ pub async fn create_pool_if_table_exists(conn_str: &str, max_conn: u32, table_na
         }
 }
 
-pub async fn insert_captures<T: IntoIterator<Item = EmbeddingTime>>(values: T, pool: &Pool<Postgres>, table_name: &str) -> anyhow::Result<Vec<i64>> {
+pub async fn save_captured_embeddings_to_db<T: IntoIterator<Item = EmbeddingTime>>(values: T, pool: &Pool<Postgres>, table_name: &str) -> anyhow::Result<Vec<i64>> {
     let query_init = format!("INSERT INTO {} (embedding, time)", table_name);
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(query_init);
     qb.push_values(values, |mut b, et| {
