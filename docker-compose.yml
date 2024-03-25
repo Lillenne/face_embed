@@ -1,0 +1,25 @@
+name: face_embed
+
+services:
+  minio:
+    container_name: minio
+    image: quay.io/minio/minio
+    command: ['server', '/data', '--console-address', '":9001"']
+    ports:
+      - 9000:9000
+      - 9001:9001
+    restart: always
+
+  rabbitmq:
+    container_name: rabbitmq
+    image: rabbitmq:3.13-management
+    ports:
+      - 5672:5672
+      - 15672:15672
+
+  embed:
+    container_name: face_embed
+    privileged: true
+    image: todo
+    volumes:
+      - /dev/video0:/dev/video0

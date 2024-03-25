@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE INDEX ON items USING hnsw (embedding vector_ip_ops)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6e47a30512a4eedfbdd59e8435f3d4a0165aa906adc9118c68894c627d80d2b2"
+}

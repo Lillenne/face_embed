@@ -1,9 +1,7 @@
-use std::io::{Cursor, Write};
 use std::sync::atomic;
 
-use clap::{arg, Parser, Subcommand, Args};
-use embed::EmbedArgs;
-use detect::DetectArgs;
+use clap::{arg, Parser, Args};
+use face_embed::path_utils::path_parser;
 use face_embed::{embedding::*, face_detector::*, *};
 use signal_hook::consts::*;
 use signal_hook_tokio::{Signals, Handle};
@@ -13,11 +11,8 @@ use sqlx::types::chrono;
 use sqlx::{Pool, Postgres};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use visualize::VisualizeArgs;
 
 mod embed;
-mod visualize;
-mod detect;
 
 // Defaults
 const ARCFACE_PATH: &str = "./models/arcface-int8.onnx";
@@ -39,33 +34,44 @@ pub(crate) static SHUTDOWN_REQUESTED: atomic::AtomicBool = atomic::AtomicBool::n
 async fn main() -> anyhow::Result<()> {
     setup_signal_handlers()?;
     rayon::ThreadPoolBuilder::new().num_threads(4).build_global()?;
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Detect(args) => { detect::detect(args).await? },
-        Command::Embed(args) => { embed::embed(args).await? },
-        Command::Visualize(args) => { visualize::visualize(args).await? },
-    };
+    let args = EmbedArgs::parse();
+    embed::embed(args).await?;
     Ok(())
 }
 
-
 #[derive(Parser, Debug)]
-#[command(name = "faces", version, about)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
+pub(crate) struct EmbedArgs {
+    /// The path to the ultraface detection model.
+    #[arg(short, long, default_value = ULTRAFACE_PATH, value_parser = path_parser)]
+    detector_path: String,
 
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// Detect faces
-    Detect(DetectArgs),
+    /// The path to the arface embedding model.
+    #[arg(short, long, default_value = ARCFACE_PATH, value_parser = path_parser)]
+    embedder_path: String,
 
-    /// Detect faces and generate face signatures
-    Embed(EmbedArgs),
+    #[arg(short, long, default_value_t = 0.5)]
+    similarity_threshold: f32,
 
-    /// Visualize face signatures in a dimensionality-reduced plot
-    Visualize(VisualizeArgs)
+    #[command(flatten)]
+    source: Source,
+
+    #[command(flatten)]
+    database: DatabaseArgs,
+
+    #[command(flatten)]
+    message_bus: MessageBusArgs,
+
+    #[command(flatten)]
+    storage: S3Args,
+
+    #[arg(long, default_value_t = 60 * 60 * 2 /* 2 hr */)]
+    cache_duration_seconds: u64,
+
+    #[arg(long, default_value_t = 1000)]
+    channel_bound: usize,
+
+    #[arg(short, long)]
+    verbose: bool
 }
 
 #[derive(Args, Debug)]
@@ -115,10 +121,6 @@ pub(crate) struct Source {
     /// The desired FPS of the camera. This should be a FPS value the camera is capable of capturing at.
     #[arg(short, long, default_value_t = 30)]
     fps: u32,
-
-    /// Process images on disk using the specified glob pattern instead of a live feed from a camera.
-    #[arg(short, long)]
-    glob: Option<String>,
 }
 
 fn setup_signal_handlers() -> anyhow::Result<(Handle, JoinHandle<()>)> {

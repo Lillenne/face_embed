@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use lapin::{Connection, ConnectionProperties, Channel, options::{QueueDeclareOptions, BasicConsumeOptions, BasicAckOptions}, types::FieldTable};
 use serde::{Deserialize, Serialize};
-use sqlx::{Postgres, Pool, types::chrono::{DateTime, Utc}};
+use sqlx::types::chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 
 use crate::db::User;
@@ -40,12 +40,11 @@ pub async fn create_consumer(conn: &Connection,
         while let Some(delivery) = consumer.next().await {
             let delivery = delivery.expect("error in consumer");
             let event: Event = rmp_serde::from_slice(&delivery.data)?;
-            println!("Consumed {:?}", &event);
             delivery
                 .ack(BasicAckOptions::default())
                 .await
                 .expect("ack");
-            println!("Acknowledged!");
+            println!("Consumed {:?}", &event);
         }
         Ok(())
     });

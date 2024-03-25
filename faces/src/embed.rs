@@ -1,7 +1,7 @@
 pub(crate) use std::num::NonZeroU32;
-use std::time::Duration;
+use std::{time::Duration, io::Cursor};
 
-use face_embed::{path_utils::path_parser, db::{setup_sqlx, EmbeddingTime, save_captured_embeddings_to_db, get_label}, messaging::{create_queue, Event, create_consumer}, image_utils::{resize, crop_and_resize}, storage::get_or_create_bucket};
+use face_embed::{db::{setup_sqlx, EmbeddingTime, save_captured_embeddings_to_db, get_label}, messaging::{create_queue, Event}, image_utils::{resize, crop_and_resize}, storage::get_or_create_bucket};
 use image::{ImageBuffer, Rgb};
 use lapin::{options::BasicPublishOptions, Channel, BasicProperties};
 use rayon::prelude::*;
@@ -17,41 +17,6 @@ use crate::*;
 
 type FaceTimeStamp = (Vec<u8>, chrono::DateTime<chrono::Utc>);
 
-#[derive(Args, Debug)]
-pub(crate) struct EmbedArgs {
-    /// The path to the ultraface detection model.
-    #[arg(short, long, default_value = ULTRAFACE_PATH, value_parser = path_parser)]
-    detector_path: String,
-
-    /// The path to the arface embedding model.
-    #[arg(short, long, default_value = ARCFACE_PATH, value_parser = path_parser)]
-    embedder_path: String,
-
-    #[arg(short, long, default_value_t = 0.5)]
-    similarity_threshold: f32,
-
-    #[command(flatten)]
-    source: Source,
-
-    #[command(flatten)]
-    database: DatabaseArgs,
-
-    #[command(flatten)]
-    message_bus: MessageBusArgs,
-
-    #[command(flatten)]
-    storage: S3Args,
-
-    #[arg(long, default_value_t = 60 * 60 * 2 /* 2 hr */)]
-    cache_duration_seconds: u64,
-
-    #[arg(long, default_value_t = 1000)]
-    channel_bound: usize,
-
-    #[arg(short, long)]
-    verbose: bool
-}
-
 pub(crate) async fn embed(args: EmbedArgs) -> anyhow::Result<()> {
     let v = args.verbose;
     let (s_handle, s_task) = setup_signal_handlers()?;
@@ -63,13 +28,13 @@ pub(crate) async fn embed(args: EmbedArgs) -> anyhow::Result<()> {
     let embedding_dims = arcface.dims();
     if v { println!("Embedding model generated."); }
 
-    println!("Generating face detection model...");
+    if v { println!("Generating face detection model..."); }
     let uf_cfg = UltrafaceDetectorConfig {
         top_k: NonZeroU32::new(3).unwrap(),
         ..Default::default()
     };
     let det = UltrafaceDetector::new(uf_cfg, &args.detector_path)?;
-    println!("Face detection model generated.");
+    if v { println!("Face detection model generated."); }
 
     let (tx, rx) = mpsc::channel(args.channel_bound);
     let pool = pool_task.await?;
@@ -82,11 +47,7 @@ pub(crate) async fn embed(args: EmbedArgs) -> anyhow::Result<()> {
         Ok(())
     });
 
-    if let Some(glob) = args.source.glob {
-        embed_files(glob, tx, det, embedding_dims.3, embedding_dims.2, v).await?;
-    } else {
-        process_feed(args.source.x_res, args.source.y_res, args.source.fps, tx, det, embedding_dims.3, embedding_dims.2, v).await?;
-    }
+    process_feed(args.source.x_res, args.source.y_res, args.source.fps, tx, det, embedding_dims.3, embedding_dims.2, v).await?;
     embed_task.await??;
     s_handle.close();
     s_task.await?;
@@ -109,36 +70,6 @@ async fn process_feed(src_x: u32, src_y: u32, src_fps: u32, tx: Sender<FaceTimeS
             y,
             emb_x,
             emb_y).await?;
-    }
-    Ok(())
-}
-
-async fn embed_files(glob: String, tx: Sender<FaceTimeStamp>, det: impl FaceDetector, emb_x: NonZeroU32, emb_y: NonZeroU32, v: bool) -> anyhow::Result<()> {
-    for path in glob::glob(glob.as_str())? {
-        if SHUTDOWN_REQUESTED.load(atomic::Ordering::Acquire) {
-            break;
-        }
-        match path {
-            Ok(file) => {
-                if v { println!("Processing file: {}", file.as_os_str().to_string_lossy()) }
-                let bind = image::open(file)?.into_rgb8();
-                let x = NonZeroU32::new(bind.width()).unwrap();
-                let y = NonZeroU32::new(bind.height()).unwrap();
-                let mut vec = bind.into_vec();
-                embed_frame(
-                    &tx,
-                vec.as_mut_slice(),
-                    &det,
-                    x,
-                    y,
-                    emb_x,
-                    emb_y).await?;
-            },
-            Err(e) => {
-                if v { println!("Failed to process file: {:?}", e) }
-                continue;
-            }
-        }
     }
     Ok(())
 }

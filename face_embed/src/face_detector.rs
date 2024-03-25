@@ -1,7 +1,6 @@
 use crate::*;
 use std::num::NonZeroU32;
 
-use anyhow::anyhow;
 use ort::Session;
 use ndarray::{prelude::*, Array4, ArrayView2, Dim, ViewRepr};
 

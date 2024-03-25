@@ -6,17 +6,22 @@ pub async fn get_or_create_bucket(bucket_name: &str, endpoint: String, access_ke
         endpoint
     };
     let creds = Credentials::new(Some(access_key), Some(secret_key), None, None, None)?;
-    let mut bucket = Bucket::new(bucket_name, region.clone(), creds.clone())?.with_path_style();
 
-    if !bucket.exists().await? {
-        bucket = Bucket::create_with_path_style(
+    // Create the bucket
+    if let Ok(response) = Bucket::create_with_path_style(
             bucket_name,
-            region,
-            creds,
+            region.clone(),
+            creds.clone(),
             BucketConfiguration::default()
-        ).await?
-        .bucket;
+        ).await {
+        if response.response_code == 200 {
+            // Created the bucket
+            return Ok(response.bucket);
+        }
     }
 
+    // already existed
+    let mut bucket = Bucket::new(bucket_name, region, creds)?;
+    bucket.set_path_style();
     Ok(bucket)
 }
