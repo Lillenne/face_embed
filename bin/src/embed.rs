@@ -1,7 +1,7 @@
 pub(crate) use std::num::NonZeroU32;
 use std::time::Duration;
 
-use face_embed::{path_utils::path_parser, db::{setup_sqlx, EmbeddingTime, save_captured_embeddings_to_db}, messaging::create_queue, image_utils::{resize, crop_and_resize}, storage::get_or_create_bucket};
+use face_embed::{path_utils::path_parser, db::{setup_sqlx, EmbeddingTime, save_captured_embeddings_to_db, get_label}, messaging::{create_queue, Event, create_consumer}, image_utils::{resize, crop_and_resize}, storage::get_or_create_bucket};
 use image::{ImageBuffer, Rgb};
 use lapin::{options::BasicPublishOptions, Channel, BasicProperties};
 use rayon::prelude::*;
@@ -248,15 +248,22 @@ async fn spawn_embedder_thread(
 
         let times: Vec<DateTime<Utc>> = new.iter().map(|et| et.time.clone()).collect();
         let ids = save_captured_embeddings_to_db(new, &pool, &table_name).await?;
-        //for (i, (et, (jpg, name))) in new.into_iter().zip(paths).enumerate() {
+
         for ((id, path), time) in ids.into_iter().zip(paths.into_iter()).zip(times.into_iter()) {
-            let payload = format!("{{ id: {}, time: {}, path: {} }}", id, time, path);
+            let user = get_label(id, &table_name, &pool, similarity_threshold).await?;
+            let event = Event {
+                id,
+                time,
+                path,
+                user,
+            };
+            let payload = rmp_serde::to_vec_named(&event)?;
             _ = channel
                 .basic_publish(
                     "",
                     route,
                     BasicPublishOptions::default(),
-                    payload.as_bytes(),
+                    payload.as_slice(),
                     BasicProperties::default(),
                 )
                 .await?

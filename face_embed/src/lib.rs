@@ -9,6 +9,7 @@ pub mod storage;
 use fast_image_resize as fr;
 
 pub use ort;
+pub use rmp_serde;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ZeroToOneF32 {
