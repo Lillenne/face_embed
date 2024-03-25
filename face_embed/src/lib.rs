@@ -8,7 +8,6 @@ pub mod image_utils;
 pub mod storage;
 use fast_image_resize as fr;
 
-#[cfg(feature = "ort")]
 pub use ort;
 
 #[derive(Clone, Copy, Debug)]

@@ -41,8 +41,8 @@ flowchart
 - [x] Limit data generation (_e.g._, do not publish similar embeddings in a given time frame)
 - [x] Add publishing to RabbitMQ message bus
 - [x] Save detected faces to object storage
-- [ ] Benchmark ort (vs tract) with quantized models & switch if appropriate 
+- [x] Benchmark ort (vs tract) with quantized models & switch if appropriate - switched to ort with quantized models
 - [ ] Create message consumer
-- [ ] Move data visualization to a separate binary
 - [ ] Generate Docker Compose and/or Helm charts for Postgresql w/ Vector, application, and RabbitMQ
 - [ ] Improve startup and shutdown robustness (Nokhwa crate often has issues with initial webcam setup and rude shutdown)
+- [ ] Move data visualization to a separate binary

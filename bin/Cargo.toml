@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-face_embed = { path = "../face_embed", features = ["ort"] }
+face_embed = { path = "../face_embed" }
 rayon = "1.9.0"
 pgvector = { version = "0.3", features = ["sqlx"] }
 anyhow = "1.0.80"
