@@ -214,6 +214,7 @@ async fn spawn_embedder_thread(
         if n_rec == 0 || SHUTDOWN_REQUESTED.load(atomic::Ordering::Relaxed) {
             break
         }
+
         let mut embeddings: Vec<_> = buf.par_iter()
             .map(|(face, time)| {
                 let embedding = model.generate_embedding(face.as_slice())?;
@@ -229,9 +230,9 @@ async fn spawn_embedder_thread(
 
         let mut new: Vec<EmbeddingTime> = vec!();
         let mut crops: Vec<(Vec<u8>, DateTime<Utc>)> = vec!();
-        for _ in (0..n_rec).rev() { // reverse to pop left & avoid shifting, ordering not important
-            let et = embeddings.pop().unwrap();
-            let crop = buf.pop().unwrap();
+        for _ in 0..n_rec {
+            let et = embeddings.pop().expect("Error calculating embedding");
+            let crop = buf.pop().expect("Error calculating embedding");
             if cache.push(std::time::Instant::now(), &et) {
                 new.push(et);
                 crops.push(crop);

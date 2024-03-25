@@ -20,8 +20,8 @@ mod visualize;
 mod detect;
 
 // Defaults
-const ARCFACE_PATH: &str = "./models/arcface.onnx";
-const ULTRAFACE_PATH: &str = "./models/ultraface-RFB-320.onnx";
+const ARCFACE_PATH: &str = "./models/arcface-int8.onnx";
+const ULTRAFACE_PATH: &str = "./models/ultraface-int8.onnx";
 const POSTGRES_CONN_STR: &str = "postgres://postgres:postgres@localhost:5432";
 const TABLE_NAME: &str = "items";
 const RABBITMQ_DEFAULT_ADDR: &str = "amqp://127.0.0.1:5672/%2f";

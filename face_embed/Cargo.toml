@@ -3,12 +3,18 @@ name = "face_embed"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# default = ["ort"]
+tract = ["dep:tract-onnx"]
+ort = ["dep:ort"]
+
 [dependencies]
 fast_image_resize = "3.0.4"
 image = "0.24.9"
 ndarray = "0.15.6"
 num-traits = "0.2.18"
-tract-onnx = "0.21.1"
+tract-onnx = { version= "0.21.1", optional = true }
+ort = { version = "2.0.0-alpha.4", optional = true }
 rand = "0.8.5"
 anyhow = "1.0.80"
 pgvector = { version = "0.3", features = ["sqlx"] }

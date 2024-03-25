@@ -1,9 +1,12 @@
 use std::num::NonZeroU32;
-use tract_onnx::prelude::*;
 
 use crate::face_detector::ModelDims;
 
-type ArcFaceModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+#[cfg(feature = "tract")]
+use tract_onnx::prelude::*;
+
+#[cfg(all(feature = "tract", feature = "ort"))]
+compile_error!("feature \"tract\" and feature \"ort\" cannot be enabled at the same time");
 
 /// Defines an embedding generating algorithm
 pub trait EmbeddingGenerator: ModelDims {
@@ -11,33 +14,20 @@ pub trait EmbeddingGenerator: ModelDims {
     fn generate_embedding(&self, face: &[u8]) -> anyhow::Result<Vec<f32>>;
 }
 
-pub struct ArcFace {
-    model: ArcFaceModel,
+pub fn similarity<T: num_traits::Float>(embedding: &[T], nearest_embed: &[T]) -> T {
+    embedding.iter().zip(nearest_embed.iter()).map(|(a,b)| *a * *b).reduce(|a,b| a + b).unwrap()
 }
 
-impl ArcFace {
-    const ARCFACE_X: usize = 112;
-    const ARCFACE_Y: usize = 112;
-    pub fn new(path: &str) -> anyhow::Result<ArcFace> {
-        let model = tract_onnx::onnx()
-            .model_for_path(path)?
-            .into_optimized()?
-            .into_runnable()?;
-        Ok(ArcFace { model })
-    }
+#[cfg(feature = "tract")]
+type ArcFaceModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+#[cfg(feature = "ort")]
+type ArcFaceModel = ort::Session;
 
-    fn preprocess(&self, face: &[u8]) -> anyhow::Result<Tensor> {
-        if face.len() != ArcFace::ARCFACE_X * ArcFace::ARCFACE_Y * 3 {
-            return Err(anyhow::anyhow!("Incorrect image dimensions"));
-        }
-
-        Ok(tract_ndarray::Array4::from_shape_fn(
-            (1, 3, ArcFace::ARCFACE_Y, ArcFace::ARCFACE_X),
-            |(_, c, y, x)| {
-                    let idx = (y * ArcFace::ARCFACE_X as usize + x) * 3 + c;
-                    face[idx] as f32
-        }).into())
-    }
+pub struct ArcFace {
+    #[cfg(feature = "ort")]
+    model: ArcFaceModel,
+    #[cfg(feature = "tract")]
+    model: ArcFaceModel,
 }
 
 impl ModelDims for ArcFace {
@@ -51,8 +41,76 @@ impl ModelDims for ArcFace {
     }
 }
 
-impl EmbeddingGenerator for ArcFace {
-    fn generate_embedding(&self, face: &[u8]) -> anyhow::Result<Vec<f32>> {
+impl ArcFace {
+    const ARCFACE_X: usize = 112;
+    const ARCFACE_Y: usize = 112;
+
+    #[cfg(feature = "tract")]
+    pub fn new(path: &str) -> anyhow::Result<ArcFace> {
+        let model = tract_onnx::onnx()
+            .model_for_path(path)?
+            .into_optimized()?
+            .into_runnable()?;
+        Ok(ArcFace { model })
+    }
+
+    #[cfg(feature = "tract")]
+    fn preprocess(&self, face: &[u8]) -> anyhow::Result<Tensor> {
+        if face.len() != ArcFace::ARCFACE_X * ArcFace::ARCFACE_Y * 3 {
+            return Err(anyhow::anyhow!("Incorrect image dimensions"));
+        }
+
+        Ok(tract_ndarray::Array4::from_shape_fn(
+            (1, 3, ArcFace::ARCFACE_Y, ArcFace::ARCFACE_X),
+            |(_, c, y, x)| {
+                    let idx = (y * ArcFace::ARCFACE_X as usize + x) * 3 + c;
+                    face[idx] as f32
+        }).into())
+    }
+
+    #[cfg(feature = "ort")]
+    pub fn new(path: &str) -> anyhow::Result<ArcFace> {
+        let session = ort::Session::builder()?
+            .with_optimization_level(ort::GraphOptimizationLevel::Level1)?
+            .with_parallel_execution(false)?
+            .with_intra_threads(2)?
+            .with_model_from_file(path)?;
+
+        Ok(ArcFace { model: session })
+    }
+
+    #[cfg(feature = "ort")]
+    fn preprocess(&self, face: &[u8]) -> anyhow::Result<ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 4]>>> {
+        if face.len() != ArcFace::ARCFACE_X * ArcFace::ARCFACE_Y * 3 {
+            return Err(anyhow::anyhow!("Incorrect image dimensions"));
+        }
+
+        let input = ndarray::Array4::from_shape_fn(
+            (1, 3, ArcFace::ARCFACE_Y, ArcFace::ARCFACE_X),
+            |(_, c, y, x)| {
+                    let idx = (y * ArcFace::ARCFACE_X as usize + x) * 3 + c;
+                    face[idx] as f32
+        });
+
+        Ok(input)
+    }
+
+    #[cfg(feature = "ort")]
+    fn generate_embedding_ort(&self, face: &[u8]) -> anyhow::Result<Vec<f32>> {
+        let input = self.preprocess(face)?;
+        let res = self.model.run(ort::inputs!("data" => input)?)?;
+        let mut output = res["fc1"].extract_raw_tensor::<f32>()?.1.to_vec();
+        // let mut output = res["fc1"].extract_tensor::<f32>()?.view().to_owned().into_raw_vec();
+        // normalize to unit length
+        let magnitude = output.iter().zip(output.iter()).map(|(a,b)| a * b).reduce(|a,b| a + b).unwrap().sqrt();
+        for v in output.iter_mut() {
+            *v = *v / magnitude;
+        }
+        Ok(output)
+    }
+
+    #[cfg(feature = "tract")]
+    fn generate_embedding_tract(&self, face: &[u8]) -> anyhow::Result<Vec<f32>> {
         let input = self.preprocess(face)?;
         let result = self.model.run(tvec!(input.into()))?;
 
@@ -71,8 +129,21 @@ impl EmbeddingGenerator for ArcFace {
     }
 }
 
-pub fn similarity<T: num_traits::Float>(embedding: &[T], nearest_embed: &[T]) -> T {
-    embedding.iter().zip(nearest_embed.iter()).map(|(a,b)| *a * *b).reduce(|a,b| a + b).unwrap()
+impl EmbeddingGenerator for ArcFace {
+
+    fn generate_embedding(&self, face: &[u8]) -> anyhow::Result<Vec<f32>> {
+        #[cfg(feature = "ort")]
+        {
+            return self.generate_embedding_ort(face);
+        }
+
+        #[cfg(feature = "tract")]
+        {
+            return self.generate_embedding_tract(face);
+        }
+
+        return Ok(vec!())
+    }
 }
 
 #[cfg(test)]

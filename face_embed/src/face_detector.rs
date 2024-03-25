@@ -1,9 +1,21 @@
 use crate::*;
 use std::num::NonZeroU32;
-use tract_ndarray::{prelude::*, Array4, ArrayView2, Dim, ViewRepr};
-use tract_onnx::{prelude::*, tract_core::tract_data::itertools::Itertools};
 
+use anyhow::anyhow;
+#[cfg(feature = "ort")]
+use ort::Session;
+#[cfg(feature = "tract")]
+use tract_ndarray::{prelude::*, Array4, ArrayView2, Dim, ViewRepr};
+#[cfg(feature = "tract")]
+use tract_onnx::{prelude::*, tract_core::tract_data::itertools::Itertools};
+#[cfg(feature = "tract")]
 type UltrafaceModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+
+#[cfg(feature = "ort")]
+type UltrafaceModel = ort::Session;
+
+#[cfg(feature = "ort")]
+use ndarray::{prelude::*, Array4, ArrayView2, Dim, ViewRepr};
 
 pub trait ModelDims {
     /// Returns the model dimensions (b,c,h,w)
@@ -47,6 +59,9 @@ impl Default for UltrafaceDetectorConfig {
 }
 
 pub struct UltrafaceDetector {
+    #[cfg(feature = "tract")]
+    model: UltrafaceModel,
+    #[cfg(feature = "ort")]
     model: UltrafaceModel,
     cfg: UltrafaceDetectorConfig,
 }
@@ -61,19 +76,32 @@ impl UltrafaceDetector {
         if !std::path::Path::new(path).exists() {
             return Err(anyhow::anyhow!("Model path does not exist"))
         }
-        let model = tract_onnx::onnx()
-            .model_for_path(path)?
-            .into_optimized()?
-            .into_runnable()?;
-        Ok(UltrafaceDetector { cfg, model })
+
+        #[cfg(feature = "tract")]
+        {
+            let model = tract_onnx::onnx()
+                .model_for_path(path)?
+                .into_optimized()?
+                .into_runnable()?;
+            return Ok(UltrafaceDetector { cfg, model });
+        }
+
+        #[cfg(feature = "ort")]
+        {
+            let model = Session::builder()?.with_model_from_file(path)?;
+            return Ok(UltrafaceDetector { cfg, model });
+        }
+
+        Err(anyhow!("No backend provided"))
     }
 
-    /// Preprocess an RGB image
-    fn preprocess(&self, data: &[u8]) -> anyhow::Result<Tensor> {
+
+    #[cfg(feature = "ort")]
+    fn preprocess(&self, data: &[u8]) -> anyhow::Result<ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 4]>>> {
         if self.n_elements() != data.len() {
             return Err(anyhow::anyhow!("Incorrect data shape"))
         }
-        let input: Tensor = Array4::from_shape_fn(
+        let input = Array4::from_shape_fn(
             (
                 1,
                 3,
@@ -85,15 +113,36 @@ impl UltrafaceDetector {
                 (data[idx] as f32 - UltrafaceDetector::ULTRAFACE_MEAN)
                     / UltrafaceDetector::ULTRAFACE_DIV
             },
-        )
-        .into();
+        );
         Ok(input)
+    }
+
+    #[cfg(feature = "tract")]
+    /// Preprocess an RGB image
+    fn preprocess(&self, data: &[u8]) -> anyhow::Result<Tensor> {
+        if self.n_elements() != data.len() {
+            return Err(anyhow::anyhow!("Incorrect data shape"))
+        }
+        let input = Array4::from_shape_fn(
+            (
+                1,
+                3,
+                self.cfg.model_height.get() as usize,
+                self.cfg.model_width.get() as usize,
+            ),
+            |(_, c, y, x)| {
+                let idx = (y * self.cfg.model_width.get() as usize + x) * 3 + c;
+                (data[idx] as f32 - UltrafaceDetector::ULTRAFACE_MEAN)
+                    / UltrafaceDetector::ULTRAFACE_DIV
+            },
+        );
+        Ok(input.into())
     }
 
     /// Convert Ultraface bounding box outputs (x1, y1, x2, y2) to Rect
     fn get_rect(&self, view: ArrayBase<ViewRepr<&f32>, Dim<[usize; 1]>>) -> Rect {
         if view.len() != 4 {
-            panic!("View len != 4")
+            panic!("View len != 4") // shouldn't happen
         }
         let left = view[0].clamp(0.0, 1.0);
         let top = view[1].clamp(0.0, 1.0);
@@ -106,9 +155,9 @@ impl UltrafaceDetector {
         self.cfg.model_width.get() as usize * self.cfg.model_height.get() as usize * 3
     }
 
-    fn nms(&self, probs: ArrayView2<f32>, boxes: ArrayView2<f32>) -> Vec<DetectedObject> {
-        probs.column(UltrafaceDetector::ULTRAFACE_FG_IDX)
-        .iter()
+    fn nms(&self, probs: &ArrayView2<f32>, boxes: &ArrayView2<f32>) -> Vec<DetectedObject> {
+        let iter = probs.column(UltrafaceDetector::ULTRAFACE_FG_IDX)
+        .into_iter()
         .enumerate()
         .filter(move |v| {
             if *v.1 < self.cfg.prob_threshold.value {
@@ -132,15 +181,52 @@ impl UltrafaceDetector {
                 }
             }
             true
-        })
-        .sorted_by(|a, b| b.1.partial_cmp(&a.1).unwrap())
-        .take(self.cfg.top_k.get() as usize)
-        .map(|i| DetectedObject {
-            class: UltrafaceDetector::ULTRAFACE_FG_IDX,
-            confidence: *i.1,
-            bounding_box: self.get_rect(boxes.row(i.0)),
-        })
-        .collect_vec()
+        });
+
+        let mut vec = iter.collect::<Vec<_>>();
+        vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let mut output: Vec<DetectedObject> = vec!();
+        let end = (self.cfg.top_k.get() as usize).min(vec.len());
+        for i in 0..end {
+            let prob: (usize, &f32) = vec[i];
+            let bbox = DetectedObject {
+                class: UltrafaceDetector::ULTRAFACE_FG_IDX,
+                confidence: *prob.1,
+                bounding_box: self.get_rect(boxes.row(prob.0)),
+            };
+            output.push(bbox);
+        }
+        output
+    }
+
+    #[cfg(feature = "tract")]
+    fn detect_tract(&self, frame: &[u8]) -> anyhow::Result<Vec<DetectedObject>> {
+        let data = self.preprocess(frame)?;
+        let result = self.model.run(tvec!(data.into()))?;
+        let probs = result[0]
+            .to_array_view::<f32>()?
+            .into_shape((UltrafaceDetector::ULTRAFACE_N_BOXES, 2))?;
+        let boxes = result[1]
+            .to_array_view::<f32>()?
+            .into_shape((UltrafaceDetector::ULTRAFACE_N_BOXES, 4))?;
+        Ok(self.nms(&probs, &boxes))
+    }
+
+    #[cfg(feature = "ort")]
+    fn detect_ort(&self, frame: &[u8]) -> anyhow::Result<Vec<DetectedObject>> {
+        let data = self.preprocess(frame)?;
+        let result = self.model.run(ort::inputs!("input" => data)?)?;
+
+        let btensor = result["boxes"].extract_tensor::<f32>()?;
+        let bview = btensor.view();
+        let boxes = bview .to_shape((UltrafaceDetector::ULTRAFACE_N_BOXES, 4))?;
+
+        let probsa = result["scores"].extract_tensor::<f32>()?;
+        let probsb = probsa.view();
+        let probs = probsb
+            .to_shape((UltrafaceDetector::ULTRAFACE_N_BOXES, 2))?;
+
+        Ok(self.nms(&probs.view(), &boxes.view()))
     }
 }
 
@@ -152,14 +238,12 @@ impl ModelDims for UltrafaceDetector {
 
 impl FaceDetector for UltrafaceDetector {
     fn detect(&self, frame: &[u8]) -> anyhow::Result<Vec<DetectedObject>> {
-        let data = self.preprocess(frame)?;
-        let result = self.model.run(tvec!(data.into()))?;
-        let probs = result[0]
-            .to_array_view::<f32>()?
-            .into_shape((UltrafaceDetector::ULTRAFACE_N_BOXES, 2))?;
-        let boxes = result[1]
-            .to_array_view::<f32>()?
-            .into_shape((UltrafaceDetector::ULTRAFACE_N_BOXES, 4))?;
-        Ok(self.nms(probs, boxes))
+        #[cfg(feature = "tract")]
+        return self.detect_tract(frame);
+
+        #[cfg(feature = "ort")]
+        return self.detect_ort(frame);
+
+        return Ok(vec!())
     }
 }
