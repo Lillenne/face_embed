@@ -42,14 +42,14 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Parser, Debug)]
 pub(crate) struct EmbedArgs {
     /// The path to the ultraface detection model.
-    #[arg(short, long, default_value = ULTRAFACE_PATH, value_parser = path_parser)]
+    #[arg(short, long, default_value = ULTRAFACE_PATH, value_parser = path_parser, env)]
     detector_path: String,
 
     /// The path to the arface embedding model.
-    #[arg(short, long, default_value = ARCFACE_PATH, value_parser = path_parser)]
+    #[arg(short, long, default_value = ARCFACE_PATH, value_parser = path_parser, env)]
     embedder_path: String,
 
-    #[arg(short, long, default_value_t = 0.5)]
+    #[arg(short, long, default_value_t = 0.5, env)]
     similarity_threshold: f32,
 
     #[command(flatten)]
@@ -64,62 +64,62 @@ pub(crate) struct EmbedArgs {
     #[command(flatten)]
     storage: S3Args,
 
-    #[arg(long, default_value_t = 60 * 60 * 2 /* 2 hr */)]
+    #[arg(long, default_value_t = 60 * 60 * 2 /* 2 hr */, env)]
     cache_duration_seconds: u64,
 
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 1000, env)]
     channel_bound: usize,
 
-    #[arg(short, long)]
+    #[arg(short, long, env)]
     verbose: bool
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct MessageBusArgs {
-    #[arg(short, long, default_value = RABBITMQ_DEFAULT_ADDR)]
+    #[arg(short, long, default_value = RABBITMQ_DEFAULT_ADDR, env)]
     address: String,
-    #[arg(short, long, default_value = RABBITMQ_DEFAULT_QUEUE)]
+    #[arg(short, long, default_value = RABBITMQ_DEFAULT_QUEUE, env)]
     queue_name: String
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct DatabaseArgs {
     /// The Postgresql database connection string.
-    #[arg(short, long, default_value = POSTGRES_CONN_STR)]
+    #[arg(short, long, default_value = POSTGRES_CONN_STR, env)]
     conn_str: String,
 
-    #[arg(short, long, default_value = TABLE_NAME)]
+    #[arg(short, long, default_value = TABLE_NAME, env)]
     /// The table name in the postgresql database.
     table_name: String,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct S3Args {
-    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_URL)]
+    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_URL, env)]
     url: String,
 
-    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_ACCESS_KEY)]
+    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_ACCESS_KEY, env)]
     access_key: String,
 
-    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_SECRET_KEY)]
+    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_SECRET_KEY, env)]
     secret_key: String,
 
-    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_BUCKET)]
+    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_BUCKET, env)]
     bucket: String
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct Source {
     /// The desired X resolution of the camera. This should be a resolution the camera is capable of capturing at.
-    #[arg(short, long, default_value_t = 640)]
+    #[arg(short, long, default_value_t = 640, env)]
     x_res: u32,
 
     /// The desired Y resolution of the camera. This should be a resolution the camera is capable of capturing at.
-    #[arg(short, long, default_value_t = 480)]
+    #[arg(short, long, default_value_t = 480, env)]
     y_res: u32,
 
     /// The desired FPS of the camera. This should be a FPS value the camera is capable of capturing at.
-    #[arg(short, long, default_value_t = 30)]
+    #[arg(short, long, default_value_t = 30, env)]
     fps: u32,
 }
 

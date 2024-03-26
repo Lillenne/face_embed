@@ -15,13 +15,12 @@ signal-hook-tokio = { version = "0.3.1", features = ["futures-v0_3"] }
 signal-hook = "0.3.17"
 ndarray = "0.15.6"
 futures-util = "0.3.30"
-clap = { version = "4.5.2", features = ["derive"] }
+clap = { version = "4.5.2", features = ["derive", "env"] }
 fast_image_resize = "3.0.4"
 lapin = "2.3.1"
 uuid = { version = "1.8.0", features = ["v7"] }
 
 [dependencies.rust-s3]
-# git = "https://github.com/durch/rust-s3.git"
 version = "0.33.0"
 default-features = false
 features = ["tokio-rustls-tls"]

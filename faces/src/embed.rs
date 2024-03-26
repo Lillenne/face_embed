@@ -20,7 +20,7 @@ type FaceTimeStamp = (Vec<u8>, chrono::DateTime<chrono::Utc>);
 pub(crate) async fn embed(args: EmbedArgs) -> anyhow::Result<()> {
     let v = args.verbose;
     let (s_handle, s_task) = setup_signal_handlers()?;
-    let pool_task = setup_sqlx(args.database.conn_str.as_str(), 5, args.database.table_name.as_str());
+    let pool_task = setup_sqlx(args.database.conn_str.as_str(), 50, args.database.table_name.as_str());
     let ch_task = create_queue(&args.message_bus.address, &args.message_bus.queue_name);
 
     if v { println!("Generating embedding model..."); }
@@ -61,7 +61,9 @@ async fn process_feed(src_x: u32, src_y: u32, src_fps: u32, tx: Sender<FaceTimeS
     if v { println!("Beginning stream..."); }
     while !SHUTDOWN_REQUESTED.load(atomic::Ordering::Acquire) {
         let slice = buffer.as_mut_slice();
-        cam.write_frame_to_buffer::<RgbFormat>(slice)?;
+        if cam.write_frame_to_buffer::<RgbFormat>(slice).is_err() {
+            break;
+        }
         embed_frame(
             &tx,
         slice,
@@ -70,6 +72,9 @@ async fn process_feed(src_x: u32, src_y: u32, src_fps: u32, tx: Sender<FaceTimeS
             y,
             emb_x,
             emb_y).await?;
+    }
+    if cam.is_stream_open() {
+        cam.stop_stream()?;
     }
     Ok(())
 }
@@ -112,6 +117,7 @@ async fn embed_frame(
         .into_vec();
         if let Err(_) = tx.send((roi, time)).await {
             // Likely shutdown requested or queue full. Return to beginning of loop for shutdown code & drop this frame's outputs
+            println!("Dropped message...");
             break;
         }
     }
@@ -225,7 +231,10 @@ fn get_cam(x: u32, y: u32, fps: u32, v: bool) -> anyhow::Result<(Camera, NonZero
     } = cam.resolution();
     let x = NonZeroU32::new(x).ok_or(anyhow::anyhow!("Unable to get proper camera x res"))?;
     let y = NonZeroU32::new(y).ok_or(anyhow::anyhow!("Unable to get proper camera y res"))?;
-    cam.open_stream()?;
+    if let Err(e) = cam.open_stream() {
+        println!("Failed to open camera stream with error {}", e.to_string());
+        return Err(e.into());
+    }
     if v { println!("Setup camera with resolution ({}, {}) at {} fps.", x.get(), y.get(), cam.frame_rate()); }
     Ok((cam, x, y))
 }
