@@ -1,0 +1,27 @@
+[package]
+name = "frontend"
+version = "0.1.0"
+authors = ["Austin Kearns <austinkearns47@gmail.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+# Debug
+log = "0.4.19"
+dioxus-logger = "0.4.1"
+console_error_panic_hook = "0.1.7"
+plotters = "0.3.5"
+plotters-canvas = "0.3.0"
+base64 = "0.22.0"
+dioxus = { version = "*", features = ["fullstack", "router"] }
+dioxus-fullstack = { version = "*" }
+axum = { version = "*", optional = true }
+serde = { version = "1.0.197", features = ["derive"] }
+
+[features]
+# default = ["server"]
+default = []
+server = ["axum", "dioxus/axum"]
+web = ["dioxus/web"]
