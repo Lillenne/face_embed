@@ -1938,6 +1938,7 @@ dependencies = [
  "lapin",
  "ndarray",
  "nokhwa",
+ "num_cpus",
  "pgvector",
  "rayon",
  "rust-s3",

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH row AS \n                (INSERT INTO users (name, email) \n                VALUES ($1, $2) RETURNING id)\n            INSERT INTO classes (signature, user_id)\n            SELECT $3, id\n            FROM row\n            returning user_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        {
+          "Custom": {
+            "name": "vector",
+            "kind": "Simple"
+          }
+        }
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "d518480107603920dcd040b59028b0b021b0755c6812d584dc1924606ddc48d6"
+}

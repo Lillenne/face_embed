@@ -9,7 +9,12 @@ pub trait EmbeddingGenerator: ModelDims {
 }
 
 pub fn similarity<T: num_traits::Float>(embedding: &[T], nearest_embed: &[T]) -> T {
-    embedding.iter().zip(nearest_embed.iter()).map(|(a,b)| *a * *b).reduce(|a,b| a + b).unwrap()
+    embedding
+        .iter()
+        .zip(nearest_embed.iter())
+        .map(|(a, b)| *a * *b)
+        .reduce(|a, b| a + b)
+        .unwrap()
 }
 
 pub struct ArcFace {
@@ -36,12 +41,15 @@ impl ArcFace {
             .with_optimization_level(ort::GraphOptimizationLevel::Level1)?
             .with_parallel_execution(false)?
             .with_intra_threads(2)?
-            .with_model_from_file(path)?;
+            .commit_from_file(path)?;
 
         Ok(ArcFace { model: session })
     }
 
-    fn preprocess(&self, face: &[u8]) -> anyhow::Result<ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 4]>>> {
+    fn preprocess(
+        &self,
+        face: &[u8],
+    ) -> anyhow::Result<ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 4]>>> {
         if face.len() != ArcFace::ARCFACE_X * ArcFace::ARCFACE_Y * 3 {
             return Err(anyhow::anyhow!("Incorrect image dimensions"));
         }
@@ -49,9 +57,10 @@ impl ArcFace {
         let input = ndarray::Array4::from_shape_fn(
             (1, 3, ArcFace::ARCFACE_Y, ArcFace::ARCFACE_X),
             |(_, c, y, x)| {
-                    let idx = (y * ArcFace::ARCFACE_X as usize + x) * 3 + c;
-                    face[idx] as f32
-        });
+                let idx = (y * ArcFace::ARCFACE_X as usize + x) * 3 + c;
+                face[idx] as f32
+            },
+        );
 
         Ok(input)
     }
@@ -61,10 +70,16 @@ impl EmbeddingGenerator for ArcFace {
     fn generate_embedding(&self, face: &[u8]) -> anyhow::Result<Vec<f32>> {
         let input = self.preprocess(face)?;
         let res = self.model.run(ort::inputs!("data" => input)?)?;
-        let mut output = res["fc1"].extract_raw_tensor::<f32>()?.1.to_vec();
+        let mut output = res["fc1"].try_extract_raw_tensor::<f32>()?.1.to_vec();
         // let mut output = res["fc1"].extract_tensor::<f32>()?.view().to_owned().into_raw_vec();
         // normalize to unit length
-        let magnitude = output.iter().zip(output.iter()).map(|(a,b)| a * b).reduce(|a,b| a + b).unwrap().sqrt();
+        let magnitude = output
+            .iter()
+            .zip(output.iter())
+            .map(|(a, b)| a * b)
+            .reduce(|a, b| a + b)
+            .unwrap()
+            .sqrt();
         for v in output.iter_mut() {
             *v = *v / magnitude;
         }
@@ -74,13 +89,13 @@ impl EmbeddingGenerator for ArcFace {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
-    use image::EncodableLayout;
-    use fast_image_resize as fr;
+    use super::similarity;
     use crate::embedding::{ArcFace, EmbeddingGenerator};
     use crate::face_detector::*;
-    use crate::image_utils::{resize, crop_and_resize};
-    use super::similarity;
+    use crate::image_utils::{crop_and_resize, resize};
+    use fast_image_resize as fr;
+    use image::EncodableLayout;
+    use std::num::NonZeroU32;
 
     const ARCFACE_PATH: &str = "../models/arcface.onnx";
     const ULTRAFACE_PATH: &str = "../models/ultraface-RFB-320.onnx";
@@ -103,18 +118,26 @@ mod tests {
         assert!(similarity < 0.5);
     }
 
-    fn calculate_similarity(a_path: &str, b_path: &str)  -> anyhow::Result<f32> {
+    fn calculate_similarity(a_path: &str, b_path: &str) -> anyhow::Result<f32> {
         let arcface = ArcFace::new(ARCFACE_PATH)?;
-        let det = UltrafaceDetector::new(UltrafaceDetectorConfig {
-            top_k: NonZeroU32::new(1).unwrap(),
-            ..Default::default()
-        }, ULTRAFACE_PATH).unwrap();
+        let det = UltrafaceDetector::new(
+            UltrafaceDetectorConfig {
+                top_k: NonZeroU32::new(1).unwrap(),
+                ..Default::default()
+            },
+            ULTRAFACE_PATH,
+        )
+        .unwrap();
         let a = get_embedding(a_path, &arcface, &det)?;
         let b = get_embedding(b_path, &arcface, &det)?;
         Ok(similarity(a.as_slice(), b.as_slice()))
     }
 
-    fn get_embedding(path: &str, arcface: &impl EmbeddingGenerator, det: &impl FaceDetector) -> anyhow::Result<Vec<f32>> {
+    fn get_embedding(
+        path: &str,
+        arcface: &impl EmbeddingGenerator,
+        det: &impl FaceDetector,
+    ) -> anyhow::Result<Vec<f32>> {
         let embedding_dims = arcface.dims();
         let det_dims = det.dims();
         let a_in = image::open(path)?;
@@ -128,7 +151,8 @@ mod tests {
             det_dims.3,
             det_dims.2,
             fr::ResizeAlg::Nearest,
-        ).expect("Resize img");
+        )
+        .expect("Resize img");
         let face = det.detect(img.buffer())?[0];
         let crop = face.bounding_box.to_crop_box(x.get(), y.get());
         let mut vec = rgb.clone().into_vec();

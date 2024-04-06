@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "CREATE INDEX IF NOT EXISTS idx ON items USING hnsw (embedding vector_ip_ops)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e04ee25f55fe84ecba20e1b836d5394c34b2aac63404bc03efba89a00ba91c15"
+}

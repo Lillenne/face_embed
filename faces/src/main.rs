@@ -1,14 +1,13 @@
 use std::sync::atomic;
 
-use clap::{arg, Parser, Args};
+use clap::{arg, Args, Parser};
 use face_embed::path_utils::path_parser;
 use face_embed::{embedding::*, face_detector::*, *};
 use signal_hook::consts::*;
-use signal_hook_tokio::{Signals, Handle};
+use signal_hook_tokio::{Handle, Signals};
 
 use futures_util::stream::StreamExt;
 use sqlx::types::chrono;
-use sqlx::{Pool, Postgres};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -29,12 +28,15 @@ const OBJECT_STORAGE_DEFAULT_BUCKET: &str = "feed";
 // Global shutdown
 pub(crate) static SHUTDOWN_REQUESTED: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     setup_signal_handlers()?;
-    rayon::ThreadPoolBuilder::new().num_threads(4).build_global()?;
     let args = EmbedArgs::parse();
+    if args.rayon_pool_num_threads > 0 && (args.rayon_pool_num_threads as usize) < num_cpus::get() {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.rayon_pool_num_threads as usize)
+            .build_global()?;
+    }
     embed::embed(args).await?;
     Ok(())
 }
@@ -70,8 +72,11 @@ pub(crate) struct EmbedArgs {
     #[arg(long, default_value_t = 1000, env)]
     channel_bound: usize,
 
+    #[arg(long, default_value_t = -1, env)]
+    rayon_pool_num_threads: i32,
+
     #[arg(short, long, env)]
-    verbose: bool
+    verbose: bool,
 }
 
 #[derive(Args, Debug)]
@@ -79,7 +84,7 @@ pub(crate) struct MessageBusArgs {
     #[arg(short, long, default_value = RABBITMQ_DEFAULT_ADDR, env)]
     address: String,
     #[arg(short, long, default_value = RABBITMQ_DEFAULT_QUEUE, env)]
-    queue_name: String
+    queue_name: String,
 }
 
 #[derive(Args, Debug)]
@@ -105,7 +110,7 @@ pub(crate) struct S3Args {
     secret_key: String,
 
     #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_BUCKET, env)]
-    bucket: String
+    bucket: String,
 }
 
 #[derive(Args, Debug)]
@@ -124,24 +129,20 @@ pub(crate) struct Source {
 }
 
 fn setup_signal_handlers() -> anyhow::Result<(Handle, JoinHandle<()>)> {
-    let mut signals = Signals::new(&[
-            SIGTERM,
-            SIGINT,
-            SIGQUIT,
-        ])?;
-        let handle = signals.handle();
-        let signals_task = tokio::spawn(async move {
-            while let Some(signal) = signals.next().await {
-                match signal {
-                    SIGTERM | SIGINT | SIGQUIT => {
-                        if !SHUTDOWN_REQUESTED.load(atomic::Ordering::Acquire) {
-                            println!("Received termination request. Finishing active operations and shutting down...");
-                            SHUTDOWN_REQUESTED.store(true, atomic::Ordering::Release)
-                       }
-                    },
-                    _ => unreachable!(),
+    let mut signals = Signals::new(&[SIGTERM, SIGINT, SIGQUIT])?;
+    let handle = signals.handle();
+    let signals_task = tokio::spawn(async move {
+        while let Some(signal) = signals.next().await {
+            match signal {
+                SIGTERM | SIGINT | SIGQUIT => {
+                    if !SHUTDOWN_REQUESTED.load(atomic::Ordering::Acquire) {
+                        println!("Received termination request. Finishing active operations and shutting down...");
+                        SHUTDOWN_REQUESTED.store(true, atomic::Ordering::Release)
+                    }
                 }
+                _ => unreachable!(),
             }
-        });
+        }
+    });
     Ok((handle, signals_task))
 }
