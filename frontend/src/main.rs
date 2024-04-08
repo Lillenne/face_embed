@@ -1,10 +1,14 @@
 #![allow(non_snake_case)]
 
-use base64::prelude::*;
+use std::num::NonZeroU32;
+
 use dioxus::prelude::*;
+use face_embed::{
+    embedding::ArcFace,
+    face_detector::{UltrafaceDetector, UltrafaceDetectorConfig},
+    messaging::*,
+};
 use log::LevelFilter;
-use serde::{Deserialize, Serialize};
-use std::fmt::Display;
 
 mod canvas;
 
@@ -28,59 +32,10 @@ fn App() -> Element {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct MyFormData {
-    pub name: String,
-    pub email: String,
-    pub files: Vec<ImageFile>,
-}
-
-impl MyFormData {
-    pub fn new() -> Self {
-        MyFormData {
-            name: String::new(),
-            email: String::new(),
-            files: vec![],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ImageFile {
-    pub name: String,
-    pub contents: Vec<u8>,
-}
-
-impl ImageFile {
-    pub fn DataUrl(&self) -> Option<String> {
-        let ext = self.name.split('.').last()?;
-        let mut b64 = String::new();
-        let lower = ext.to_lowercase();
-        b64.push_str("data:image/");
-        if lower.ends_with("jpg") || lower.ends_with("jpeg") {
-            b64.push_str("jpeg");
-        } else if lower.ends_with("png") {
-            b64.push_str("png");
-        } else {
-            return None;
-        }
-        b64.push_str(";base64,");
-        let encoded = BASE64_STANDARD.encode(&self.contents);
-        b64.push_str(&encoded);
-        Some(b64)
-    }
-}
-
-impl Display for ImageFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.name)
-    }
-}
-
 #[component]
 fn Form() -> Element {
-    let mut err = use_signal_sync(|| String::new());
-    let mut form_data = use_signal_sync(|| MyFormData::new());
+    let mut err = use_signal_sync(String::new);
+    let mut form_data = use_signal_sync(MyFormData::new);
     let uploaded = move |evt: FormEvent| async move {
         let mut data = form_data.write();
         if let Some(engine) = evt.files() {
@@ -93,7 +48,7 @@ fn Form() -> Element {
     };
 
     rsx! {
-        if err().len() > 0 {
+        if !err().is_empty() {
             p { "Error: {err}" }
         }
 
@@ -133,14 +88,27 @@ fn Form() -> Element {
 
         div { style: "display: flex; flex-direction: row; flex-wrap: wrap",
             for upload in form_data().files {
-                img { src: upload.DataUrl(), height: 300, width:300 }
+                img { src: upload.data_url(), height: 300, width:300 }
             }
         }
     }
 }
 
-#[server]
+// #[server]
 async fn submit(data: MyFormData) -> Result<String, ServerFnError> {
     let f: String = format!("{} {} {}", data.name, data.email, data.files.len());
+    let cfg = UltrafaceDetectorConfig {
+        top_k: NonZeroU32::new(1).unwrap(),
+        ..Default::default()
+    };
+    if let Ok(uf) = UltrafaceDetector::new(cfg, "") {
+        if let Ok(af) = ArcFace::new("") {
+            let face = uf.
+        } else {
+            return Err(ServerFnError::new("Failed to create embedder"));
+        }
+    } else {
+        return Err(ServerFnError::new("Failed to create face detector"));
+    }
     Ok(f)
 }

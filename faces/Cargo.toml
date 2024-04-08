@@ -8,8 +8,13 @@ face_embed = { path = "../face_embed" }
 rayon = "1.9.0"
 pgvector = { version = "0.3", features = ["sqlx"] }
 anyhow = "1.0.80"
-image = "0.24.9"
-sqlx = { version = "0.7.3", features = [ "runtime-tokio", "postgres", "chrono", "tls-rustls" ] }
+image = "0.25.1"
+sqlx = { version = "0.7.3", features = [
+  "runtime-tokio",
+  "postgres",
+  "chrono",
+  "tls-rustls",
+] }
 tokio = { version = "1.36.0", features = ["macros", "rt-multi-thread"] }
 signal-hook-tokio = { version = "0.3.1", features = ["futures-v0_3"] }
 signal-hook = "0.3.17"
@@ -29,4 +34,4 @@ features = ["tokio-rustls-tls"]
 [dependencies.nokhwa]
 git = "https://github.com/l1npengtul/nokhwa.git"
 rev = "ea971242a888987222375189fb78c84fa85e5a4e"
-features = [ "input-native" ]
+features = ["input-native"]

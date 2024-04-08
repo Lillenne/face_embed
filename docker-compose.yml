@@ -4,7 +4,7 @@ services:
   s3:
     container_name: s3
     image: quay.io/minio/minio
-    command: ['server', '/data', '--console-address', ':9001']
+    command: ["server", "/data", "--console-address", ":9001"]
     environment:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
@@ -27,20 +27,20 @@ services:
     environment:
       POSTGRES_PASSWORD: postgres
 
-  face:
-    container_name: faces
-    privileged: true
-    image: 8ce9fc5b75d2
-    restart: always
-    environment:
-      - CONN_STR=postgres://postgres:postgres@db:5432
-      - ADDRESS=amqp://mb:5672/%2f
-      - URL=http://s3:9000
-      - ACCESS_KEY=minioadmin
-      - SECRET_KEY=minioadmin
-    volumes:
-      - /dev/video0:/dev/video0
-    depends_on:
-      - s3
-      - mb
-      - db
+  # face:
+  #   container_name: faces
+  #   privileged: true
+  #   image: af84e7eee2ed
+  #   restart: always
+  #   environment:
+  #     - CONN_STR=postgres://postgres:postgres@db:5432
+  #     - ADDRESS=amqp://mb:5672/%2f
+  #     - URL=http://s3:9000
+  #     - ACCESS_KEY=minioadmin
+  #     - SECRET_KEY=minioadmin
+  #   volumes:
+  #     - /dev/video0:/dev/video0
+  #   depends_on:
+  #     - s3
+  #     - mb
+  #     - db

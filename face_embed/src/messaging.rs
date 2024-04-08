@@ -1,3 +1,7 @@
+use base64::prelude::BASE64_STANDARD;
+use std::fmt::Display;
+
+use base64::prelude::*;
 use futures_util::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
@@ -11,6 +15,61 @@ use tokio::task::JoinHandle;
 type Handle = tokio::task::JoinHandle<anyhow::Result<()>>;
 
 use crate::db::User;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MyFormData {
+    pub name: String,
+    pub email: String,
+    pub files: Vec<ImageFile>,
+}
+
+impl MyFormData {
+    pub fn new() -> Self {
+        MyFormData {
+            name: String::new(),
+            email: String::new(),
+            files: vec![],
+        }
+    }
+}
+
+impl Default for MyFormData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageFile {
+    pub name: String,
+    pub contents: Vec<u8>,
+}
+
+impl ImageFile {
+    pub fn data_url(&self) -> Option<String> {
+        let ext = self.name.split('.').last()?;
+        let mut b64 = String::new();
+        let lower = ext.to_lowercase();
+        b64.push_str("data:image/");
+        if lower.ends_with("jpg") || lower.ends_with("jpeg") {
+            b64.push_str("jpeg");
+        } else if lower.ends_with("png") {
+            b64.push_str("png");
+        } else {
+            return None;
+        }
+        b64.push_str(";base64,");
+        let encoded = BASE64_STANDARD.encode(&self.contents);
+        b64.push_str(&encoded);
+        Some(b64)
+    }
+}
+
+impl Display for ImageFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Event {

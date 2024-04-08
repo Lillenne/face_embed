@@ -1,10 +1,11 @@
-pub mod embedding;
-pub mod face_detector;
 pub mod cache;
 pub mod db;
+pub mod embedding;
+pub mod face_detector;
+pub mod image_utils;
 pub mod messaging;
 pub mod path_utils;
-pub mod image_utils;
+pub mod pipeline;
 pub mod storage;
 use fast_image_resize as fr;
 
@@ -20,8 +21,7 @@ impl ZeroToOneF32 {
     pub fn new(value: f32) -> Option<ZeroToOneF32> {
         if value >= 0.0 && value <= 1.0 {
             Some(ZeroToOneF32 { value })
-        }
-        else {
+        } else {
             None
         }
     }
@@ -58,8 +58,7 @@ impl Rect {
         let overlap = self.intersection(other);
         if overlap == 0.0 {
             overlap
-        }
-        else {
+        } else {
             overlap / self.union(other)
         }
     }
@@ -74,7 +73,7 @@ impl Rect {
             || self.bottom() <= other.top
             || other.bottom() <= self.top
         {
-            return 0.0
+            return 0.0;
         }
         let intersection_width = self.right().min(other.right()) - self.left.max(other.left);
         let intersection_height = self.bottom().min(other.bottom()) - self.top.max(other.top);
@@ -86,6 +85,11 @@ impl Rect {
         let top = (self.top * h as f32) as f64;
         let width = (self.width * w as f32).clamp(1.0, (w as f64 - left) as f32) as f64;
         let height = (self.height * h as f32).clamp(1.0, (h as f64 - top) as f32) as f64;
-        fr::CropBox {left, top, width, height}
+        fr::CropBox {
+            left,
+            top,
+            width,
+            height,
+        }
     }
 }
