@@ -10,6 +10,7 @@ ndarray = "0.15.6"
 num-traits = "0.2.18"
 ort = "2.0.0-rc.1"
 base64 = "0.22.0"
+uuid = { version = "1.8.0", features = ["v7"] }
 rand = "0.8.5"
 anyhow = "1.0.80"
 pgvector = { version = "0.3", features = ["sqlx"] }

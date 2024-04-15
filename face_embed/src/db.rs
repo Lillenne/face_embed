@@ -61,23 +61,47 @@ impl Database {
         Ok(Self { pool })
     }
 
+    pub async fn save_captured_embedding_to_db(
+        &self,
+        value: &EmbeddingTime,
+    ) -> anyhow::Result<i64> {
+        Ok(sqlx::query!(
+            "
+INSERT INTO items (embedding, time) 
+VALUES ($1, $2)
+RETURNING id ",
+            value.embedding as _,
+            value.time
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .id)
+    }
+
     pub async fn save_captured_embeddings_to_db<T: IntoIterator<Item = EmbeddingTime>>(
         &self,
         values: T,
-    ) -> anyhow::Result<Vec<i64>> {
-        let query_init = "INSERT INTO items (embedding, time)";
-        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(query_init);
-        qb.push_values(values, |mut b, et| {
-            b.push_bind(et.embedding).push_bind(et.time);
-        });
-        qb.push("RETURNING id");
-        let ids: Vec<i64> = qb
-            .build()
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(|r| r.get("id"))
-            .collect();
+    ) -> anyhow::Result<Vec<(i64, DateTime<Utc>)>> {
+        // TODO optimize...
+        let mut embeds: Vec<Vector> = vec![];
+        let mut times: Vec<DateTime<Utc>> = vec![];
+        for item in values {
+            embeds.push(item.embedding);
+            times.push(item.time);
+        }
+        let ids = sqlx::query!(
+            "
+        INSERT INTO items (embedding, time)
+        (SELECT * FROM UNNEST ($1::vector(512)[], $2::timestamptz[]))
+        RETURNING id, time",
+            &embeds as _,
+            &times
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| (r.id, r.time))
+        .collect();
         Ok(ids)
     }
 
