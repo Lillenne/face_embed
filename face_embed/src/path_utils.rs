@@ -13,16 +13,13 @@ pub fn expand_path(path: &str) -> anyhow::Result<String> {
             } else {
                 Err(anyhow::anyhow!("Failed to get relative path: {:?}", path))
             }
-        }
-        else {
+        } else {
             Err(anyhow::anyhow!("Failed to get relative path"))
         }
+    } else if let Some(str) = path.to_str() {
+        Ok(str.to_string())
     } else {
-        if let Some(str) = path.to_str() {
-            Ok(str.to_string())
-        } else {
-            Err(anyhow::anyhow!("Path contains invalid characters"))
-        }
+        Err(anyhow::anyhow!("Path contains invalid characters"))
     }
 }
 

@@ -2,29 +2,36 @@ use std::{io::Cursor, num::NonZeroU32, time::Instant};
 
 use crate::{
     cache::SlidingVectorCache,
-    db::{Database, EmbeddingTime},
+    db::{Database, EmbeddingTime, User},
     embedding::EmbeddingGenerator,
     face_detector::FaceDetector,
-    messaging::{Event, Messenger},
+    messaging::{DetectionEvent, LabelEvent, Messenger},
+    pipeline,
 };
 use chrono::{DateTime, Utc};
 use fast_image_resize as fr;
 use fr::{CropBox, DynamicImageView};
+use image::io::Reader as ImageReader;
 use image::{ImageBuffer, Rgb};
 use imgref::*;
+use pgvector::Vector;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use s3::Bucket;
 use tokio::io::AsyncRead;
 use uuid::Uuid;
 
-pub struct Detector<T: FaceDetector> {
-    detector: T,
+pub struct Detector {
+    detector: Box<dyn FaceDetector + Send + Sync>,
     embedder_width: NonZeroU32,
     embedder_height: NonZeroU32,
 }
 
-impl<T: FaceDetector> Detector<T> {
-    pub fn new(detector: T, embedder_width: NonZeroU32, embedder_height: NonZeroU32) -> Self {
+impl Detector {
+    pub fn new(
+        detector: Box<dyn FaceDetector + Send + Sync>,
+        embedder_width: NonZeroU32,
+        embedder_height: NonZeroU32,
+    ) -> Self {
         Self {
             detector,
             embedder_width,
@@ -32,8 +39,14 @@ impl<T: FaceDetector> Detector<T> {
         }
     }
 
-    pub fn process(&mut self, data: ImgRef<[u8; 3]>) -> anyhow::Result<Vec<ImgVec<[u8; 3]>>> {
-        let (_, _, dh, dw) = self.detector.dims();
+    pub fn process(&self, data: ImgRef<[u8; 3]>) -> anyhow::Result<Vec<ImgVec<[u8; 3]>>> {
+        let (db, _, dh, dw) = self.detector.dims();
+        if db.get() != 1 {
+            anyhow::bail!(
+                "Face detector implementation requires batch size {}",
+                db.get()
+            )
+        }
         let output = if data.width() == data.stride()
             && dw.get() == data.width() as u32
             && dh.get() == data.height() as u32
@@ -95,22 +108,22 @@ impl<T: FaceDetector> Detector<T> {
     }
 }
 
-pub struct Publisher<T: EmbeddingGenerator + Sync> {
-    generator: T,
+pub struct LivePublisher {
+    generator: Box<dyn EmbeddingGenerator + Send + Sync>,
     messenger: Messenger,
     database: Database,
     bucket: Bucket,
-    cache: Option<SlidingVectorCache<f32, EmbeddingTime>>,
+    cache: SlidingVectorCache<f32, EmbeddingTime>,
     similarity_threshold: f32,
 }
 
-impl<T: EmbeddingGenerator + Sync> Publisher<T> {
+impl LivePublisher {
     pub fn new(
-        generator: T,
+        generator: Box<dyn EmbeddingGenerator + Send + Sync>,
         messenger: Messenger,
         database: Database,
         bucket: Bucket,
-        cache: Option<SlidingVectorCache<f32, EmbeddingTime>>,
+        cache: SlidingVectorCache<f32, EmbeddingTime>,
         similarity_threshold: f32,
     ) -> Self {
         Self {
@@ -135,12 +148,12 @@ impl<T: EmbeddingGenerator + Sync> Publisher<T> {
 
     pub async fn process_many<'a>(
         &mut self,
-        data: Vec<(ImgRef<'a, [u8; 3]>, DateTime<Utc>)>,
+        data: &[(ImgRef<'a, [u8; 3]>, DateTime<Utc>)],
     ) -> anyhow::Result<()> {
-        let embeds = self.embed_many(&data)?;
+        let embeds = self.embed_many(data)?;
         let mut imgs = vec![];
         for (img, _) in data {
-            imgs.push(img);
+            imgs.push(*img);
         }
         self.publish_many(imgs.as_slice(), embeds).await?;
         Ok(())
@@ -152,20 +165,16 @@ impl<T: EmbeddingGenerator + Sync> Publisher<T> {
         time: DateTime<Utc>,
     ) -> anyhow::Result<EmbeddingTime> {
         let item = self.create_embedding(data, time)?;
-        if let Some(ref mut cache) = self.cache {
-            if cache.push(Instant::now(), &item) {
-                Ok(item)
-            } else {
-                Err(anyhow::anyhow!("Embedding not unique!"))
-            }
-        } else {
+        if self.cache.push(Instant::now(), &item) {
             Ok(item)
+        } else {
+            Err(anyhow::anyhow!("Embedding not unique!"))
         }
     }
 
     pub fn embed_many(
         &mut self,
-        data: &Vec<(ImgRef<'_, [u8; 3]>, DateTime<Utc>)>,
+        data: &[(ImgRef<'_, [u8; 3]>, DateTime<Utc>)],
     ) -> anyhow::Result<Vec<EmbeddingTime>> {
         let embeds: Vec<_> = data
             .par_iter()
@@ -175,14 +184,10 @@ impl<T: EmbeddingGenerator + Sync> Publisher<T> {
         let filtered = embeds
             .into_iter()
             .flat_map(|item| {
-                if let Some(ref mut cache) = self.cache {
-                    if cache.push(Instant::now(), &item) {
-                        Some(item)
-                    } else {
-                        None
-                    }
-                } else {
+                if self.cache.push(Instant::now(), &item) {
                     Some(item)
+                } else {
+                    None
                 }
             })
             .collect::<Vec<EmbeddingTime>>();
@@ -200,29 +205,42 @@ impl<T: EmbeddingGenerator + Sync> Publisher<T> {
             .database
             .save_captured_embedding_to_db(&embedding)
             .await?;
-        let user = self
+        let event = if let Some((user, similarity)) = self
             .database
             .get_label(id, self.similarity_threshold)
-            .await?;
-        let event = Event {
-            id,
-            time: embedding.time,
-            path,
-            user,
+            .await?
+        {
+            DetectionEvent {
+                id,
+                time: embedding.time,
+                path,
+                user: Some(user),
+                similarity,
+            }
+        } else {
+            DetectionEvent {
+                id,
+                time: embedding.time,
+                path,
+                user: None,
+                similarity: 0.0,
+            }
         };
         let payload = rmp_serde::to_vec_named(&event)?;
         self.messenger.publish(payload.as_slice()).await?;
         Ok(())
     }
 
-    pub async fn publish_many<'a>(
+    async fn publish_many(
         &self,
-        imgs: &[ImgRef<'a, [u8; 3]>],
+        imgs: &[ImgRef<'_, [u8; 3]>],
         data: Vec<EmbeddingTime>,
     ) -> anyhow::Result<()> {
-        let paths = self
-            .push_jpgs(imgs.iter().zip(data.iter().map(|et| &et.time)))
-            .await?;
+        let paths = push_jpgs(
+            imgs.iter().zip(data.iter().map(|et| &et.time)),
+            &self.bucket,
+        )
+        .await?;
         // TODO single query
         let ids = self.database.save_captured_embeddings_to_db(data).await?;
         for ((id, time), path) in ids.into_iter().zip(paths) {
@@ -230,11 +248,17 @@ impl<T: EmbeddingGenerator + Sync> Publisher<T> {
                 .database
                 .get_label(id, self.similarity_threshold)
                 .await?;
-            let event = Event {
+            let (user, similarity) = if let Some((user, similarity)) = user {
+                (Some(user), similarity)
+            } else {
+                (None, 0.0)
+            };
+            let event = DetectionEvent {
                 id,
                 time,
                 path,
                 user,
+                similarity,
             };
             let payload = rmp_serde::to_vec_named(&event)?;
             self.messenger.publish(payload.as_slice()).await?;
@@ -266,87 +290,94 @@ impl<T: EmbeddingGenerator + Sync> Publisher<T> {
         buf: ImgRef<'a, [u8; 3]>,
         time: &DateTime<Utc>,
     ) -> anyhow::Result<String> {
-        let bytes = Self::encode_jpg(Vec::<u8>::new(), buf)?;
-        self.push_object(&mut bytes.as_slice(), time).await
-    }
-
-    async fn push_jpgs<'a, V: Iterator<Item = (&'a ImgRef<'a, [u8; 3]>, &'a DateTime<Utc>)>>(
-        &self,
-        data: V,
-    ) -> anyhow::Result<Vec<String>> {
-        let mut buffer: Vec<u8> = vec![];
-        let mut collect: Vec<String> = vec![];
-        for item in data {
-            buffer = Self::encode_jpg(buffer, *item.0)?; // encode into buffer and return same buf
-            collect.push(self.push_object(&mut buffer.as_slice(), item.1).await?);
-        }
-        Ok(collect)
-    }
-
-    fn encode_jpg(mut bytes: Vec<u8>, buf: ImgRef<[u8; 3]>) -> anyhow::Result<Vec<u8>> {
-        let slice = buf.to_contiguous_buf(); // Copy shouldn't happen
-        let b = slice.0.into_owned();
-        let img = ImageBuffer::<Rgb<u8>, &[u8]>::from_raw(
-            slice.1 as _,
-            slice.2 as _,
-            bytemuck::cast_slice::<[u8; 3], u8>(b.as_slice()),
-        )
-        .unwrap();
-        let mut cursor = Cursor::new(&mut bytes);
-        img.write_to(&mut cursor, image::ImageFormat::Jpeg)?;
-        Ok(bytes)
-    }
-
-    async fn push_object<R: AsyncRead + Unpin>(
-        &self,
-        bytes: &mut R,
-        time: &DateTime<Utc>,
-    ) -> anyhow::Result<String> {
-        let mut guid = String::new();
-        guid.push('/');
-        guid.push_str(&Uuid::now_v7().to_string());
-        self.bucket
-            .put_object_stream_with_content_type(bytes, &guid, "image/jpeg")
-            .await?;
-        self.bucket
-            .put_object_tagging(&guid, &[("time", &time.to_string())])
-            .await?;
-        Ok(guid)
+        let bytes = encode_jpg(Vec::<u8>::new(), buf)?;
+        push_object(&mut bytes.as_slice(), time, &self.bucket).await
     }
 }
 
-pub struct Pipeline<T, U>
-where
-    T: FaceDetector,
-    U: EmbeddingGenerator + Sync,
-{
-    detector: Detector<T>,
-    publisher: Publisher<U>,
+pub struct LabelPublisher {
+    detector: Detector,
+    bucket: Bucket,
+    db: Database,
+    generator: Box<dyn EmbeddingGenerator + Send + Sync>,
+    messenger: Messenger,
 }
 
-impl<T, U> Pipeline<T, U>
-where
-    T: FaceDetector,
-    U: EmbeddingGenerator + Sync,
-{
-    pub fn new(detector: Detector<T>, publisher: Publisher<U>) -> Self {
-        Self {
+impl LabelPublisher {
+    pub fn new(
+        detector: Detector,
+        generator: Box<dyn EmbeddingGenerator + Send + Sync>,
+        db: Database,
+        messenger: Messenger,
+        bucket: Bucket,
+    ) -> Self {
+        LabelPublisher {
             detector,
-            publisher,
+            bucket,
+            db,
+            generator,
+            messenger,
         }
     }
 
-    pub async fn process(
-        &mut self,
-        image: ImgRef<'_, [u8; 3]>,
-        time: DateTime<Utc>,
-    ) -> anyhow::Result<()> {
-        let data = self.detector.process(image)?;
-        for img in data {
-            self.publisher.process(img.as_ref(), time).await?
+    pub async fn publish_from_files(&self, data: User, imgs: Vec<Vec<u8>>) -> anyhow::Result<()> {
+        let mut collect: Vec<Img<Vec<[u8; 3]>>> = vec![];
+        for img in imgs {
+            let cursor = Cursor::new(img.as_slice());
+            let decoded = ImageReader::new(cursor)
+                .with_guessed_format()?
+                .decode()?
+                .into_rgb8();
+            let (w, h) = (decoded.width(), decoded.height());
+            let buffer = decoded.into_raw();
+            let imgref = bytes_as_imgref(buffer.as_slice(), w as _, h as _)?;
+            let mut faces = self.detector.process(imgref)?;
+            collect.append(&mut faces);
         }
+        let refs: Vec<ImgRef<[u8; 3]>> = collect.iter().map(|item| item.as_ref()).collect();
+        self.publish(data, refs.as_slice()).await?;
         Ok(())
     }
+
+    pub async fn publish<'a>(
+        &self,
+        data: User,
+        imgs: &[ImgRef<'a, [u8; 3]>],
+        // signatures: Vec<Vector>
+    ) -> anyhow::Result<()> {
+        let mut buf: Vec<u8> = vec![];
+        let mut paths: Vec<String> = vec![];
+        for img in imgs {
+            let mut guid = String::new();
+            guid.push('/');
+            guid.push_str(&Uuid::now_v7().to_string());
+            buf = encode_jpg(buf, *img)?;
+            self.bucket
+                .put_object_stream_with_content_type(&mut buf.as_slice(), &guid, "image/jpeg")
+                .await?;
+            paths.push(guid);
+        }
+
+        let mut signatures: Vec<Vector> = vec![];
+        for img in imgs {
+            let sig = self.generator.generate_embedding(to_bytes(*img))?;
+            signatures.push(sig.into());
+        }
+        let id = self
+            .db
+            .insert_label(data.name.clone(), data.email.clone(), signatures.as_slice())
+            .await?;
+
+        let event = LabelEvent { id, user: data };
+        let msg = rmp_serde::to_vec_named(&event)?;
+        self.messenger.publish(msg.as_slice()).await?;
+        Ok(())
+    }
+}
+
+pub fn bytes_as_imgref(bytes: &[u8], w: usize, h: usize) -> anyhow::Result<ImgRef<'_, [u8; 3]>> {
+    let slice = bytemuck::cast_slice::<u8, [u8; 3]>(bytes);
+    Ok(ImgRef::new(slice, w, h))
 }
 
 fn crop_and_resize(
@@ -372,4 +403,48 @@ fn crop_and_resize(
 
 fn to_bytes(data: ImgRef<[u8; 3]>) -> &[u8] {
     bytemuck::cast_slice::<[u8; 3], u8>(data.buf())
+}
+
+fn encode_jpg(mut bytes: Vec<u8>, buf: ImgRef<[u8; 3]>) -> anyhow::Result<Vec<u8>> {
+    let slice = buf.to_contiguous_buf(); // Copy shouldn't happen
+    let b = slice.0.into_owned();
+    let img = ImageBuffer::<Rgb<u8>, &[u8]>::from_raw(
+        slice.1 as _,
+        slice.2 as _,
+        bytemuck::cast_slice::<[u8; 3], u8>(b.as_slice()),
+    )
+    .unwrap();
+    let mut cursor = Cursor::new(&mut bytes);
+    img.write_to(&mut cursor, image::ImageFormat::Jpeg)?;
+    Ok(bytes)
+}
+
+async fn push_object<R: AsyncRead + Unpin>(
+    bytes: &mut R,
+    time: &DateTime<Utc>,
+    bucket: &Bucket,
+) -> anyhow::Result<String> {
+    let mut guid = String::new();
+    guid.push('/');
+    guid.push_str(&Uuid::now_v7().to_string());
+    bucket
+        .put_object_stream_with_content_type(bytes, &guid, "image/jpeg")
+        .await?;
+    bucket
+        .put_object_tagging(&guid, &[("time", &time.to_string())])
+        .await?;
+    Ok(guid)
+}
+
+async fn push_jpgs<'a, V: Iterator<Item = (&'a ImgRef<'a, [u8; 3]>, &'a DateTime<Utc>)>>(
+    data: V,
+    bucket: &Bucket,
+) -> anyhow::Result<Vec<String>> {
+    let mut buffer: Vec<u8> = vec![];
+    let mut collect: Vec<String> = vec![];
+    for item in data {
+        buffer = encode_jpg(buffer, *item.0)?; // encode into buffer and return same buf
+        collect.push(push_object(&mut buffer.as_slice(), item.1, bucket).await?);
+    }
+    Ok(collect)
 }

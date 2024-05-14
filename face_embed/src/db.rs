@@ -4,7 +4,7 @@ use sqlx::{
     postgres::PgPoolOptions,
     prelude::FromRow,
     types::chrono::{DateTime, Utc},
-    Pool, Postgres, QueryBuilder, Row,
+    Pool, Postgres,
 };
 
 use crate::cache::EmbeddingRef;
@@ -14,7 +14,6 @@ pub struct User {
     pub id: i64,
     pub name: String,
     pub email: String,
-    pub similarity: f64,
 }
 
 #[derive(FromRow, Debug, Clone)]
@@ -105,46 +104,85 @@ RETURNING id ",
         Ok(ids)
     }
 
-    pub async fn get_label(&self, id: i64, thresh: f32) -> anyhow::Result<Option<User>> {
-        let query = format!("
-    SELECT * FROM (SELECT ((classes.signature <#> (SELECT embedding FROM items WHERE id = {})) * -1) as similarity, users.*
-    FROM classes JOIN users on classes.user_id=users.id
-    WHERE classes.user_id IS NOT NULL
-    ORDER BY similarity)
-    WHERE similarity > {};
-    ", id, thresh);
-        let row = sqlx::query_as::<_, User>(&query)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row)
+    pub async fn get_label(&self, id: i64, thresh: f32) -> anyhow::Result<Option<(User, f32)>> {
+        let row = sqlx::query!("
+            SELECT * FROM (SELECT ((classes.signature <#> (SELECT embedding FROM items WHERE id = $1)) * -1) as similarity, users.*
+            FROM classes JOIN users on classes.user_id=users.id
+            WHERE classes.user_id IS NOT NULL
+            ORDER BY similarity)
+            WHERE similarity > $2;
+        ", id, thresh as f64 // TODO should this be f32?
+        ).fetch_optional(&self.pool).await?;
+        if let Some(items) = row {
+            let user = User {
+                id: items.id,
+                name: items.name.expect("Expected user name, recieved None."),
+                email: items.email.expect("Expected user email, recieved None."),
+            };
+            Ok(Some((
+                user,
+                items
+                    .similarity
+                    .expect("Expected similarity, recieved None.") as f32,
+            )))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn insert_label(
         &self,
         name: String,
         email: String,
-        signature: Vector,
+        signatures: &[Vector],
     ) -> anyhow::Result<i64> {
+        // TODO single query -- translate this to many
+        // "
+        // WITH row AS
+        //     (INSERT INTO users (name, email)
+        //     VALUES ($1, $2) RETURNING id)
+        // INSERT INTO classes (signature, user_id)
+        // SELECT $3, id
+        // FROM row
+        // returning user_id
+        // ",
         let record = sqlx::query!(
-            "
-            WITH row AS 
-                (INSERT INTO users (name, email) 
-                VALUES ($1, $2) RETURNING id)
-            INSERT INTO classes (signature, user_id)
-            SELECT $3, id
-            FROM row
-            returning user_id
-            ",
+            "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id",
             name,
-            email,
-            signature as _
+            email
         )
         .fetch_one(&self.pool)
         .await?;
-        if let Some(id) = record.user_id {
-            Ok(id)
-        } else {
-            Err(anyhow::anyhow!("Failed to return new user id"))
+        for signature in signatures {
+            _ = sqlx::query!(
+                "INSERT INTO classes (signature, user_id) VALUES ($1, $2)",
+                *signature as _,
+                record.id
+            )
+            .execute(&self.pool)
+            .await?;
         }
+        // let record = sqlx::query!(
+        //     "
+        // WITH
+        //     row AS (INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id),
+        //     sigs AS (SELECT UNNEST($3::vector(512)[]) as signature)
+        // INSERT INTO classes (signature, user_id)
+        // VALUES ((
+        // SELECT signature
+        // FROM sigs), (SELECT id from row))
+        // returning user_id
+        // ",
+        //     name,
+        //     email,
+        //     signatures as _
+        // );
+        // INSERT INTO classes (signature, user_id)
+        // if let Some(id) = record.user_id {
+        //     Ok(id)
+        // } else {
+        //     Err(anyhow::anyhow!("Failed to return new user id"))
+        // }
+        Ok(record.id)
     }
 }

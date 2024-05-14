@@ -10,6 +10,7 @@ use futures_util::stream::StreamExt;
 use sqlx::types::chrono;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 mod embed;
 
@@ -26,18 +27,21 @@ const OBJECT_STORAGE_DEFAULT_SECRET_KEY: &str = "minioadmin";
 const OBJECT_STORAGE_DEFAULT_BUCKET: &str = "feed";
 
 // Global shutdown
-pub(crate) static SHUTDOWN_REQUESTED: atomic::AtomicBool = atomic::AtomicBool::new(false);
+// pub(crate) static SHUTDOWN_REQUESTED: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    setup_signal_handlers()?;
+    let token = CancellationToken::new();
+    let (s_handle, s_task) = setup_signal_handlers(token.clone())?;
     let args = EmbedArgs::parse();
     if args.rayon_pool_num_threads > 0 && (args.rayon_pool_num_threads as usize) < num_cpus::get() {
         rayon::ThreadPoolBuilder::new()
             .num_threads(args.rayon_pool_num_threads as usize)
             .build_global()?;
     }
-    embed::embed(args).await?;
+    embed::embed(args, token).await?;
+    s_handle.close();
+    s_task.await?;
     Ok(())
 }
 
@@ -128,16 +132,16 @@ pub(crate) struct Source {
     fps: u32,
 }
 
-fn setup_signal_handlers() -> anyhow::Result<(Handle, JoinHandle<()>)> {
+fn setup_signal_handlers(token: CancellationToken) -> anyhow::Result<(Handle, JoinHandle<()>)> {
     let mut signals = Signals::new(&[SIGTERM, SIGINT, SIGQUIT])?;
     let handle = signals.handle();
     let signals_task = tokio::spawn(async move {
         while let Some(signal) = signals.next().await {
             match signal {
                 SIGTERM | SIGINT | SIGQUIT => {
-                    if !SHUTDOWN_REQUESTED.load(atomic::Ordering::Acquire) {
+                    if !token.is_cancelled() {
                         println!("Received termination request. Finishing active operations and shutting down...");
-                        SHUTDOWN_REQUESTED.store(true, atomic::Ordering::Release)
+                        token.cancel();
                     }
                 }
                 _ => unreachable!(),

@@ -1,77 +1,86 @@
 pub(crate) use std::num::NonZeroU32;
-use std::{io::Cursor, time::Duration};
 
 use crate::cache::SlidingVectorCache;
 use face_embed::{
-    db::{Database, EmbeddingTime},
-    image_utils::{crop_and_resize, resize},
-    messaging::{Event, Messenger},
+    db::Database,
+    messaging::Messenger,
+    pipeline::{bytes_as_imgref, Detector, LivePublisher},
     storage::get_or_create_bucket,
 };
-use fast_image_resize as fr;
-use image::{ImageBuffer, Rgb};
+use imgref::{ImgRef, ImgVec};
 use nokhwa::{
     pixel_format::RgbFormat,
     utils::{CameraFormat, CameraIndex, RequestedFormat, Resolution},
     Camera,
 };
-use rayon::prelude::*;
-use s3::Bucket;
-use sqlx::types::chrono::{DateTime, Utc};
 use tokio::sync::mpsc::Sender;
-use uuid::Uuid;
 
 use crate::*;
 
-type FaceTimeStamp = (Vec<u8>, chrono::DateTime<chrono::Utc>);
+type FaceTimeStamp = (ImgVec<[u8; 3]>, chrono::DateTime<chrono::Utc>);
 
-pub(crate) async fn embed(args: EmbedArgs) -> anyhow::Result<()> {
-    let v = args.verbose;
-    let (s_handle, s_task) = setup_signal_handlers()?;
-    let db = Database::new(&args.database.conn_str, 50).await?;
-    let ch = Messenger::new(
-        &args.message_bus.address,
-        args.message_bus.queue_name.clone(),
-    )
-    .await?;
-
-    if v {
-        println!("Generating embedding model...");
-    }
+pub(crate) async fn embed(args: EmbedArgs, token: CancellationToken) -> anyhow::Result<()> {
     let arcface = Box::new(ArcFace::new(args.embedder_path.as_str())?);
-    let embedding_dims = arcface.dims();
-    if v {
-        println!("Embedding model generated.");
-    }
-
-    if v {
-        println!("Generating face detection model...");
-    }
+    let (_, _, h, w) = arcface.dims();
     let uf_cfg = UltrafaceDetectorConfig {
         top_k: NonZeroU32::new(3).unwrap(),
         ..Default::default()
     };
-    let det = UltrafaceDetector::new(uf_cfg, &args.detector_path)?;
-    if v {
-        println!("Face detection model generated.");
-    }
+    let det = Detector::new(
+        Box::new(UltrafaceDetector::new(uf_cfg, &args.detector_path)?),
+        w,
+        h,
+    );
 
-    let (tx, rx) = mpsc::channel(args.channel_bound);
+    let (tx, mut rx) = mpsc::channel(args.channel_bound);
+    let token_clone = token.clone();
     let embed_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-        if let Err(e) = spawn_embedder_thread(
-            rx,
-            arcface,
-            db,
-            std::time::Duration::from_secs(args.cache_duration_seconds),
-            args.similarity_threshold,
-            ch,
-            args.storage,
-            v,
+        let db = Database::new(&args.database.conn_str, 50).await?;
+        let messenger =
+            Messenger::new(&args.message_bus.address, args.message_bus.queue_name).await?;
+        let bucket = get_or_create_bucket(
+            &args.storage.bucket,
+            args.storage.url,
+            &args.storage.access_key,
+            &args.storage.secret_key,
         )
-        .await
-        {
-            println!("Embedding task error! Aborting...\n Error: {:?}", e);
-            SHUTDOWN_REQUESTED.store(true, atomic::Ordering::Relaxed);
+        .await?;
+        let cache_duration = std::time::Duration::from_secs(args.cache_duration_seconds);
+        let cache = SlidingVectorCache::new(cache_duration, args.similarity_threshold);
+        let mut publisher = LivePublisher::new(
+            arcface,
+            messenger,
+            db,
+            bucket,
+            cache,
+            args.similarity_threshold,
+        );
+
+        let mut buf: Vec<FaceTimeStamp> = vec![];
+        loop {
+            let n_rec = rx.recv_many(&mut buf, 40).await;
+            if n_rec == 0 || token_clone.is_cancelled() {
+                break;
+            }
+
+            // TODO remove intermediate allocation
+            let mut refs = vec![];
+            for owned in buf.iter() {
+                refs.push((owned.0.as_ref(), owned.1.clone()))
+            }
+
+            tokio::select!(
+                val = publisher.process_many(refs.as_slice()) => {
+                    if val.is_err() {
+                        break;
+                    }
+                }
+                _ = token_clone.cancelled() => {
+                    break;
+                }
+            );
+
+            buf.clear();
         }
         Ok(())
     });
@@ -82,14 +91,11 @@ pub(crate) async fn embed(args: EmbedArgs) -> anyhow::Result<()> {
         args.source.fps,
         tx,
         det,
-        embedding_dims.3,
-        embedding_dims.2,
-        v,
+        token,
+        args.verbose,
     )
     .await?;
     embed_task.await??;
-    s_handle.close();
-    s_task.await?;
     Ok(())
 }
 
@@ -98,23 +104,19 @@ async fn process_feed(
     src_y: u32,
     src_fps: u32,
     tx: Sender<FaceTimeStamp>,
-    det: impl FaceDetector,
-    emb_x: NonZeroU32,
-    emb_y: NonZeroU32,
+    mut det: Detector,
+    token: CancellationToken,
     v: bool,
 ) -> anyhow::Result<()> {
     let (mut cam, x, y) = get_cam(src_x, src_y, src_fps, v)?;
     let mut buffer: Vec<u8> = vec![0; (y.get() * x.get() * 3) as usize];
-
-    if v {
-        println!("Beginning stream...");
-    }
-    while !SHUTDOWN_REQUESTED.load(atomic::Ordering::Acquire) {
+    while !token.is_cancelled() {
         let slice = buffer.as_mut_slice();
         if cam.write_frame_to_buffer::<RgbFormat>(slice).is_err() {
             break;
         }
-        embed_frame(&tx, slice, &det, x, y, emb_x, emb_y).await?;
+        let imgref = bytes_as_imgref(slice, x.get() as _, y.get() as _)?;
+        embed_frame(&tx, imgref, &mut det).await?;
     }
     if cam.is_stream_open() {
         cam.stop_stream()?;
@@ -122,129 +124,22 @@ async fn process_feed(
     Ok(())
 }
 
-async fn embed_frame(
+async fn embed_frame<'a>(
     tx: &tokio::sync::mpsc::Sender<FaceTimeStamp>,
-    buffer: &mut [u8],
-    det: &impl FaceDetector,
-    x: NonZeroU32,
-    y: NonZeroU32,
-    emb_x: NonZeroU32,
-    emb_y: NonZeroU32,
+    buffer: ImgRef<'a, [u8; 3]>,
+    det: &mut Detector,
 ) -> anyhow::Result<()> {
     let time = chrono::Utc::now();
-    let det_dims = det.dims();
-    // resize image for model
-    let img = resize(
-        &buffer,
-        x,
-        y,
-        det_dims.3,
-        det_dims.2,
-        fr::ResizeAlg::Convolution(fr::FilterType::Bilinear),
-    )?;
-
-    let faces = det.detect(img.buffer())?;
+    let faces = det.process(buffer)?;
     if faces.len() == 0 {
         return Ok(());
     }
+
     for face in faces {
-        let crop = face.bounding_box.to_crop_box(x.get(), y.get());
-        let region = fr::Image::from_slice_u8(x, y, buffer, fr::PixelType::U8x3).unwrap();
-        let roi = crop_and_resize(
-            &mut (region.view()),
-            emb_x,
-            emb_y,
-            crop,
-            fr::ResizeAlg::Convolution(fr::FilterType::Mitchell),
-        )?
-        .into_vec();
-        if let Err(_) = tx.send((roi, time)).await {
-            // Likely shutdown requested or queue full. Return to beginning of loop for shutdown code & drop this frame's outputs
+        if let Err(_) = tx.send((face, time)).await {
             println!("Dropped message...");
             break;
         }
-    }
-    Ok(())
-}
-
-/// Spin up a thread to generate embeddings from face crops
-async fn spawn_embedder_thread(
-    mut rx: tokio::sync::mpsc::Receiver<FaceTimeStamp>,
-    model: Box<dyn EmbeddingGenerator + Send + Sync>,
-    db: face_embed::db::Database,
-    cache_duration: Duration,
-    similarity_threshold: f32,
-    messenger: face_embed::messaging::Messenger,
-    s3: S3Args,
-    v: bool,
-) -> anyhow::Result<()> {
-    let bucket = get_or_create_bucket(&s3.bucket, s3.url, &s3.access_key, &s3.secret_key).await?;
-
-    let mut buf: Vec<FaceTimeStamp> = vec![];
-    let mut cache = SlidingVectorCache::new(cache_duration, similarity_threshold);
-    loop {
-        let n_rec = rx.recv_many(&mut buf, 40).await;
-        if n_rec == 0 || SHUTDOWN_REQUESTED.load(atomic::Ordering::Relaxed) {
-            break;
-        }
-
-        let mut embeddings: Vec<_> = buf
-            .par_iter()
-            .map(|(face, time)| {
-                let embedding = model.generate_embedding(face.as_slice())?;
-                let embedding_vec = pgvector::Vector::from(embedding);
-                let item = EmbeddingTime {
-                    embedding: embedding_vec,
-                    time: time.clone(),
-                };
-                Ok::<EmbeddingTime, anyhow::Error>(item)
-            })
-            .flatten()
-            .collect();
-
-        let mut new: Vec<EmbeddingTime> = vec![];
-        let mut crops: Vec<(Vec<u8>, DateTime<Utc>)> = vec![];
-        for _ in 0..n_rec {
-            let et = embeddings.pop().expect("Error calculating embedding");
-            let crop = buf.pop().expect("Error calculating embedding");
-            if cache.push(std::time::Instant::now(), &et) {
-                new.push(et);
-                crops.push(crop);
-            }
-        }
-
-        if new.len() == 0 {
-            continue;
-        }
-        if v {
-            println!("Detected {} new face(s)", new.len());
-        }
-
-        let (_, _, h, w) = model.dims();
-        let paths = push_jpgs(crops.into_iter(), w.get(), h.get(), &bucket).await?;
-        buf.clear();
-
-        let times: Vec<DateTime<Utc>> = new.iter().map(|et| et.time.clone()).collect();
-        let ids = db.save_captured_embeddings_to_db(new).await?;
-
-        for ((id, path), time) in ids
-            .into_iter()
-            .zip(paths.into_iter())
-            .zip(times.into_iter())
-        {
-            let user = db.get_label(id, similarity_threshold).await?;
-            let event = Event {
-                id,
-                time,
-                path,
-                user,
-            };
-            let payload = rmp_serde::to_vec_named(&event)?;
-            messenger.publish(payload.as_slice()).await?;
-        }
-    }
-    if v {
-        println!("Embedding calculations complete.");
     }
     Ok(())
 }
@@ -284,33 +179,4 @@ fn get_cam(x: u32, y: u32, fps: u32, v: bool) -> anyhow::Result<(Camera, NonZero
         );
     }
     Ok((cam, x, y))
-}
-
-/// Encodes images as JPG and pushes them to storage with new guids & timestamp tags
-async fn push_jpgs<T: Iterator<Item = (Vec<u8>, DateTime<Utc>)>>(
-    buf: T,
-    w: u32,
-    h: u32,
-    bucket: &Bucket,
-) -> anyhow::Result<Vec<String>> {
-    let mut ids: Vec<String> = vec![];
-    let mut bytes = vec![];
-    for item in buf {
-        // Create jpg
-        let img = ImageBuffer::<Rgb<u8>, &[u8]>::from_raw(w, h, item.0.as_slice()).unwrap();
-        img.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Jpeg)?;
-
-        let mut guid = String::new();
-        guid.push('/');
-        guid.push_str(&Uuid::now_v7().to_string());
-        bucket
-            .put_object_stream_with_content_type(&mut bytes.as_slice(), &guid, "image/jpeg")
-            .await?;
-        bucket
-            .put_object_tagging(&guid, &[("time", &item.1.to_string())])
-            .await?;
-        bytes.clear();
-        ids.push(guid)
-    }
-    Ok(ids)
 }

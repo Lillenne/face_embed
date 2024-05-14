@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 face_embed = { path = "../face_embed" }
+imgref = "1.10.1"
 rayon = "1.9.0"
 pgvector = { version = "0.3", features = ["sqlx"] }
 anyhow = "1.0.80"
@@ -15,7 +16,7 @@ sqlx = { version = "0.7.3", features = [
   "chrono",
   "tls-rustls",
 ] }
-tokio = { version = "1.36.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.37.0", features = ["macros", "rt-multi-thread"] }
 signal-hook-tokio = { version = "0.3.1", features = ["futures-v0_3"] }
 signal-hook = "0.3.17"
 ndarray = "0.15.6"
@@ -25,6 +26,7 @@ fast_image_resize = "3.0.4"
 lapin = "2.3.1"
 uuid = { version = "1.8.0", features = ["v7"] }
 num_cpus = "1.16.0"
+tokio-util = "0.7.11"
 
 [dependencies.rust-s3]
 version = "0.33.0"

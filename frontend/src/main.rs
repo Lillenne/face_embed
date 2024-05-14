@@ -1,14 +1,8 @@
 #![allow(non_snake_case)]
 
-use std::num::NonZeroU32;
-
 use dioxus::prelude::*;
-use face_embed::{
-    embedding::ArcFace,
-    face_detector::{UltrafaceDetector, UltrafaceDetectorConfig},
-    messaging::*,
-};
-use log::LevelFilter;
+// use face_embed::messaging::{ImageFile, MyFormData};
+use tracing::Level;
 
 mod canvas;
 
@@ -20,8 +14,8 @@ enum Route {
 }
 
 fn main() {
-    dioxus_logger::init(LevelFilter::Debug).expect("failed to init logger");
-    console_error_panic_hook::set_once();
+    dioxus_logger::init(Level::INFO).expect("failed to init logger");
+    // console_error_panic_hook::set_once();
 
     launch(App);
 }
@@ -34,37 +28,29 @@ fn App() -> Element {
 
 #[component]
 fn Form() -> Element {
-    let mut err = use_signal_sync(String::new);
-    let mut form_data = use_signal_sync(MyFormData::new);
-    let uploaded = move |evt: FormEvent| async move {
-        let mut data = form_data.write();
-        if let Some(engine) = evt.files() {
-            for name in engine.files() {
-                if let Some(contents) = engine.read_file(&name).await {
-                    data.files.push(ImageFile { name, contents });
-                }
-            }
-        };
-    };
+    // let mut err = use_signal_sync(String::new);
+    // let mut form_data = use_signal_sync(MyFormData::new);
+    // let uploaded = move |evt: FormEvent| async move {
+    //     let mut data = form_data.write();
+    //     if let Some(engine) = evt.files() {
+    //         for name in engine.files() {
+    //             if let Some(contents) = engine.read_file(&name).await {
+    //                 data.files.push(ImageFile { name, contents });
+    //             }
+    //         }
+    //     };
+    // };
 
     rsx! {
-        if !err().is_empty() {
-            p { "Error: {err}" }
-        }
-
+        // if !err().is_empty() {
+        //     p { "Error: {err}" }
+        // }
+        //
         h1 { "Sign-up" }
         form { class: "my-form",
-            onsubmit: move |event| {
-                async move {
-                    let mut mt = form_data.write();
-                    mt.name = event.values()["name"][0].clone();
-                    mt.email = event.values()["email"][0].clone();
-                    drop(mt);
-                    if let Err(e) = submit(form_data()).await {
-                        err.set(format!("{:?}", e))
-                    };
-                }
-            },
+            action: "http://127.0.0.1:3000/upload",
+            method: "post",
+            enctype: "multipart/form-data",
             label { r#for: "name", "Name" }
             input { name: "name", placeholder: "Your name...", required: "true" },
             label { r#for: "email", "Email" }
@@ -80,35 +66,16 @@ fn Form() -> Element {
                     multiple: true,
                     name: "image-upload",
                     required: "true",
-                    onchange: uploaded
+                    // onchange: uploaded
                 }
             }
             input { r#type: "submit", value: "Confirm" },
         }
 
-        div { style: "display: flex; flex-direction: row; flex-wrap: wrap",
-            for upload in form_data().files {
-                img { src: upload.data_url(), height: 300, width:300 }
-            }
-        }
+        // div { style: "display: flex; flex-direction: row; flex-wrap: wrap",
+        //     for upload in form_data().files {
+        //         img { src: upload.data_url(), height: 300, width:300 }
+        //     }
+        // }
     }
-}
-
-// #[server]
-async fn submit(data: MyFormData) -> Result<String, ServerFnError> {
-    let f: String = format!("{} {} {}", data.name, data.email, data.files.len());
-    let cfg = UltrafaceDetectorConfig {
-        top_k: NonZeroU32::new(1).unwrap(),
-        ..Default::default()
-    };
-    if let Ok(uf) = UltrafaceDetector::new(cfg, "") {
-        if let Ok(af) = ArcFace::new("") {
-            let face = uf.
-        } else {
-            return Err(ServerFnError::new("Failed to create embedder"));
-        }
-    } else {
-        return Err(ServerFnError::new("Failed to create face detector"));
-    }
-    Ok(f)
 }

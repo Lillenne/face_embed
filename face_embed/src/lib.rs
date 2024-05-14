@@ -19,7 +19,7 @@ pub struct ZeroToOneF32 {
 
 impl ZeroToOneF32 {
     pub fn new(value: f32) -> Option<ZeroToOneF32> {
-        if value >= 0.0 && value <= 1.0 {
+        if (0.0..=1.0).contains(&value) {
             Some(ZeroToOneF32 { value })
         } else {
             None

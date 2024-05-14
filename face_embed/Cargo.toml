@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 fast_image_resize = "3.0.4"
-image = "0.25.0"
+image = "0.25"
 ndarray = "0.15.6"
 num-traits = "0.2.18"
 ort = "2.0.0-rc.1"
@@ -30,6 +30,7 @@ rmp-serde = "1.1.2"
 chrono = { version = "0.4.35", features = ["serde"] }
 imgref = "1.10.1"
 bytemuck = "1.15.0"
+async-trait = "0.1.80"
 
 [dependencies.rust-s3]
 version = "0.33.0"

@@ -57,7 +57,7 @@ impl ArcFace {
         let input = ndarray::Array4::from_shape_fn(
             (1, 3, ArcFace::ARCFACE_Y, ArcFace::ARCFACE_X),
             |(_, c, y, x)| {
-                let idx = (y * ArcFace::ARCFACE_X as usize + x) * 3 + c;
+                let idx = (y * ArcFace::ARCFACE_X + x) * 3 + c;
                 face[idx] as f32
             },
         );
@@ -81,7 +81,7 @@ impl EmbeddingGenerator for ArcFace {
             .unwrap()
             .sqrt();
         for v in output.iter_mut() {
-            *v = *v / magnitude;
+            *v /= magnitude;
         }
         Ok(output)
     }
@@ -166,6 +166,6 @@ mod tests {
             fr::ResizeAlg::Nearest,
         )?
         .into_vec();
-        Ok(arcface.generate_embedding(roi.as_bytes())?)
+        arcface.generate_embedding(roi.as_bytes())
     }
 }

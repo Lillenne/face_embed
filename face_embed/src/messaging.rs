@@ -72,11 +72,18 @@ impl Display for ImageFile {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Event {
+pub struct DetectionEvent {
     pub id: i64,
     pub time: DateTime<Utc>,
     pub path: String,
     pub user: Option<User>,
+    pub similarity: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LabelEvent {
+    pub id: i64,
+    pub user: User,
 }
 
 pub struct Messenger {
@@ -132,9 +139,10 @@ impl Messenger {
         let handle: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             while let Some(delivery) = consumer.next().await {
                 let delivery = delivery.expect("error in consumer");
-                let event: Event = rmp_serde::from_slice(&delivery.data)?;
                 delivery.ack(BasicAckOptions::default()).await.expect("ack");
-                println!("Consumed {:?}", &event);
+                // let event: DetectionEvent = rmp_serde::from_slice(&delivery.data)?;
+                // println!("Consumed {:?}", &event);
+                println!("Consumed");
             }
             Ok(())
         });
