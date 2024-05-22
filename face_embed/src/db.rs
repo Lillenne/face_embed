@@ -7,13 +7,19 @@ use sqlx::{
     Pool, Postgres,
 };
 
-use crate::cache::EmbeddingRef;
+use crate::{cache::EmbeddingRef, messaging::DetectionEvent};
 
-#[derive(FromRow, Serialize, Deserialize, Debug)]
+#[derive(Clone, FromRow, Serialize, Deserialize, Debug, Eq)]
 pub struct User {
     pub id: i64,
     pub name: String,
     pub email: String,
+}
+
+impl PartialEq for User {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.name == other.name && self.email == other.email
+    }
 }
 
 #[derive(FromRow, Debug, Clone)]
@@ -49,8 +55,8 @@ impl Database {
         sqlx::query!("CREATE EXTENSION IF NOT EXISTS vector")
             .execute(&pool)
             .await?;
-        sqlx::query!("CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY, name VARCHAR(40), email VARCHAR(40))").execute(&pool).await?;
-        sqlx::query!("CREATE TABLE IF NOT EXISTS classes (id BIGSERIAL PRIMARY KEY, signature VECTOR(512), user_id BIGINT REFERENCES users(id))").execute(&pool).await?; // labels table
+        sqlx::query!("CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY, name VARCHAR(40) NOT NULL, email VARCHAR(40) NOT NULL)").execute(&pool).await?;
+        sqlx::query!("CREATE TABLE IF NOT EXISTS classes (id BIGSERIAL PRIMARY KEY, signature VECTOR(512) NOT NULL, path CHAR(37) NOT NULL, user_id BIGINT REFERENCES users(id))").execute(&pool).await?; // labels table
         sqlx::query!("CREATE TABLE IF NOT EXISTS items (id BIGSERIAL PRIMARY KEY, embedding VECTOR(512) NOT NULL, time TIMESTAMPTZ NOT NULL, class_id BIGINT REFERENCES classes(id) NULL)").execute(&pool).await?;
         sqlx::query!(
             "CREATE INDEX IF NOT EXISTS idx ON items USING hnsw (embedding vector_ip_ops)"
@@ -81,7 +87,6 @@ RETURNING id ",
         &self,
         values: T,
     ) -> anyhow::Result<Vec<(i64, DateTime<Utc>)>> {
-        // TODO optimize...
         let mut embeds: Vec<Vector> = vec![];
         let mut times: Vec<DateTime<Utc>> = vec![];
         for item in values {
@@ -106,19 +111,27 @@ RETURNING id ",
 
     pub async fn get_label(&self, id: i64, thresh: f32) -> anyhow::Result<Option<(User, f32)>> {
         let row = sqlx::query!("
-            SELECT * FROM (SELECT ((classes.signature <#> (SELECT embedding FROM items WHERE id = $1)) * -1) as similarity, users.*
+            SELECT * FROM (SELECT ((classes.signature <#> (SELECT embedding FROM items WHERE id = $1)) * -1) as similarity, users.*, classes.id as class_id
             FROM classes JOIN users on classes.user_id=users.id
             WHERE classes.user_id IS NOT NULL
-            ORDER BY similarity)
+            ORDER BY similarity
+            LIMIT 1)
             WHERE similarity > $2;
         ", id, thresh as f64 // TODO should this be f32?
         ).fetch_optional(&self.pool).await?;
         if let Some(items) = row {
             let user = User {
                 id: items.id,
-                name: items.name.expect("Expected user name, recieved None."),
-                email: items.email.expect("Expected user email, recieved None."),
+                name: items.name,
+                email: items.email,
             };
+            sqlx::query!(
+                "UPDATE items SET class_id = $1 WHERE id = $2",
+                items.class_id,
+                id
+            )
+            .execute(&self.pool)
+            .await?;
             Ok(Some((
                 user,
                 items
@@ -135,17 +148,8 @@ RETURNING id ",
         name: String,
         email: String,
         signatures: &[Vector],
+        paths: &[String],
     ) -> anyhow::Result<i64> {
-        // TODO single query -- translate this to many
-        // "
-        // WITH row AS
-        //     (INSERT INTO users (name, email)
-        //     VALUES ($1, $2) RETURNING id)
-        // INSERT INTO classes (signature, user_id)
-        // SELECT $3, id
-        // FROM row
-        // returning user_id
-        // ",
         let record = sqlx::query!(
             "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id",
             name,
@@ -153,36 +157,51 @@ RETURNING id ",
         )
         .fetch_one(&self.pool)
         .await?;
-        for signature in signatures {
+        for (signature, path) in signatures.iter().zip(paths.iter()) {
             _ = sqlx::query!(
-                "INSERT INTO classes (signature, user_id) VALUES ($1, $2)",
+                "INSERT INTO classes (signature, user_id, path) VALUES ($1, $2, $3)",
                 *signature as _,
-                record.id
+                record.id,
+                *path
             )
             .execute(&self.pool)
             .await?;
         }
-        // let record = sqlx::query!(
-        //     "
-        // WITH
-        //     row AS (INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id),
-        //     sigs AS (SELECT UNNEST($3::vector(512)[]) as signature)
-        // INSERT INTO classes (signature, user_id)
-        // VALUES ((
-        // SELECT signature
-        // FROM sigs), (SELECT id from row))
-        // returning user_id
-        // ",
-        //     name,
-        //     email,
-        //     signatures as _
-        // );
-        // INSERT INTO classes (signature, user_id)
-        // if let Some(id) = record.user_id {
-        //     Ok(id)
-        // } else {
-        //     Err(anyhow::anyhow!("Failed to return new user id"))
-        // }
         Ok(record.id)
+    }
+
+    pub async fn update_past_captures(
+        &self,
+        user: User,
+        threshold: f32,
+    ) -> anyhow::Result<Vec<DetectionEvent>> {
+        Ok(sqlx::query!(
+            "
+WITH
+    signatures AS (SELECT id, signature FROM classes WHERE user_id = $1),
+    event_data AS (
+        UPDATE items
+        SET class_id = $1
+        WHERE ((embedding <#> (SELECT signature FROM signatures LIMIT 1)) * -1) > $2
+        RETURNING id, time, class_id, embedding
+)
+SELECT event_data.id, event_data.time, event_data.class_id, classes.path, ((classes.signature <#> embedding) * -1) AS similarity 
+FROM event_data 
+JOIN classes ON event_data.class_id = classes.id;
+",
+            user.id,
+            threshold as f64
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|r| DetectionEvent {
+            id: r.id,
+            time: r.time,
+            path: r.path,
+            user: Some(user.clone()),
+            similarity: r.similarity.unwrap() as f32,
+        })
+        .collect())
     }
 }
