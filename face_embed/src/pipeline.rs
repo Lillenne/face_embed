@@ -6,7 +6,6 @@ use crate::{
     embedding::EmbeddingGenerator,
     face_detector::FaceDetector,
     messaging::{DetectionEvent, LabelEvent, Messenger},
-    pipeline,
 };
 use chrono::{DateTime, Utc};
 use fast_image_resize as fr;
@@ -151,11 +150,15 @@ impl LivePublisher {
         data: &[(ImgRef<'a, [u8; 3]>, DateTime<Utc>)],
     ) -> anyhow::Result<()> {
         let embeds = self.embed_many(data)?;
+        let mut filtered_embeds = vec![];
         let mut imgs = vec![];
-        for (img, _) in data {
-            imgs.push(*img);
+        for ((img, _), et) in data.iter().zip(embeds.into_iter()) {
+            if let Some(et) = et {
+                imgs.push(*img);
+                filtered_embeds.push(et)
+            }
         }
-        self.publish_many(imgs.as_slice(), embeds).await?;
+        self.publish_many(imgs.as_slice(), filtered_embeds).await?;
         Ok(())
     }
 
@@ -175,7 +178,7 @@ impl LivePublisher {
     pub fn embed_many(
         &mut self,
         data: &[(ImgRef<'_, [u8; 3]>, DateTime<Utc>)],
-    ) -> anyhow::Result<Vec<EmbeddingTime>> {
+    ) -> anyhow::Result<Vec<Option<EmbeddingTime>>> {
         let embeds: Vec<_> = data
             .par_iter()
             .flat_map(|(buf, time)| self.create_embedding(*buf, *time))
@@ -183,14 +186,14 @@ impl LivePublisher {
         // intermediate collect since cache needs mutable access
         let filtered = embeds
             .into_iter()
-            .flat_map(|item| {
+            .map(|item| {
                 if self.cache.push(Instant::now(), &item) {
                     Some(item)
                 } else {
                     None
                 }
             })
-            .collect::<Vec<EmbeddingTime>>();
+            .collect::<Vec<Option<EmbeddingTime>>>();
         Ok(filtered)
     }
 
@@ -358,17 +361,30 @@ impl LabelPublisher {
             paths.push(guid);
         }
 
-        let mut signatures: Vec<Vector> = vec![];
+        let mut sigs: Vec<Vector> = vec![];
         for img in imgs {
             let sig = self.generator.generate_embedding(to_bytes(*img))?;
-            signatures.push(sig.into());
+            sigs.push(sig.into());
         }
         let id = self
             .db
-            .insert_label(data.name.clone(), data.email.clone(), signatures.as_slice())
+            .insert_label(
+                data.name.clone(),
+                data.email.clone(),
+                sigs.as_slice(),
+                paths.as_slice(),
+            )
             .await?;
 
-        let event = LabelEvent { id, user: data };
+        let mut signatures: Vec<Vec<f32>> = vec![];
+        for s in sigs {
+            signatures.push(s.to_vec());
+        }
+        let event = LabelEvent {
+            event_id: id,
+            user: User { id, ..data },
+            signatures,
+        };
         let msg = rmp_serde::to_vec_named(&event)?;
         self.messenger.publish(msg.as_slice()).await?;
         Ok(())

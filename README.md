@@ -1,12 +1,22 @@
 ## Overview
+
 ### Summary
-This application detects faces in images from a live camera feed, extracts distinct facial signatures, and publishes unique detection events to a message bus. 
+
+This repository contains multiple subprojects:
+
+1. An application which detects faces in images from a live camera feed, extracts distinct facial signatures, and publishes unique detection events to a message bus.
+2. A backend http server for adding labeled user information and facial signatures to a database and publishing sign-up events.
+3. A wasm frontend for signing up with information and images.
+4. A binary which consumes detection and sign-up events.
+5. A library for shared code.
+
 ### Goal
-Perform person identification while allowing for labels to be created _after_ detection and perform the appropriate response action, which will vary per application. 
+
+Perform person identification and perform the appropriate response action, allowing for labels to be created _after_ detection and for different responses per application.
 
 My first use case is to tackle a personal problem of mine (not signing in at the gym) by automatically detecting myself on gym security camera footage and sending an API request. Eventually, this may be extended to other users easily via an opt-in approach, where a user may _e.g._, supply an image of themselves which may then be used to generate their reference embedding and automatically determine classes they attend--even retroactively.
 
-``` mermaid
+```mermaid
 %%{ init: {"theme": "dark"} }%%
 ---
 title: Application Workflow
@@ -36,13 +46,3 @@ flowchart
     class Labeling sg
     class Detection sg
 ```
-
-## Roadmap
-- [x] Limit data generation (_e.g._, do not publish similar embeddings in a given time frame)
-- [x] Add publishing to RabbitMQ message bus
-- [x] Save detected faces to object storage
-- [x] Benchmark ort (vs tract) with quantized models & switch if appropriate - switched to ort with quantized models
-- [ ] Create message consumer
-- [ ] Generate Docker Compose and/or Helm charts for Postgresql w/ Vector, application, and RabbitMQ
-- [ ] Improve startup and shutdown robustness (Nokhwa crate often has issues with initial webcam setup and rude shutdown)
-- [ ] Move data visualization to a separate binary
