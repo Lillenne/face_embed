@@ -35,14 +35,17 @@ pub(crate) async fn embed(args: EmbedArgs, token: CancellationToken) -> anyhow::
     let (tx, mut rx) = mpsc::channel(args.channel_bound);
     let token_clone = token.clone();
     let embed_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-        let db = Database::new(&args.database.conn_str, 50).await?;
-        let messenger =
-            Messenger::new(&args.message_bus.address, args.message_bus.queue_name).await?;
+        let db = Database::new(&args.database.db_conn_str, 50).await?;
+        let messenger = Messenger::new(
+            &args.message_bus.bus_address,
+            args.message_bus.live_queue_name,
+        )
+        .await?;
         let bucket = get_or_create_bucket(
-            &args.storage.bucket,
-            args.storage.url,
-            &args.storage.access_key,
-            &args.storage.secret_key,
+            &args.storage.s3_live_bucket,
+            args.storage.s3_url,
+            &args.storage.s3_access_key,
+            &args.storage.s3_secret_key,
         )
         .await?;
         let cache_duration = std::time::Duration::from_secs(args.cache_duration_seconds);
@@ -66,7 +69,7 @@ pub(crate) async fn embed(args: EmbedArgs, token: CancellationToken) -> anyhow::
             // TODO remove intermediate allocation
             let mut refs = vec![];
             for owned in buf.iter() {
-                refs.push((owned.0.as_ref(), owned.1.clone()))
+                refs.push((owned.0.as_ref(), owned.1))
             }
 
             tokio::select!(
@@ -131,12 +134,12 @@ async fn embed_frame<'a>(
 ) -> anyhow::Result<()> {
     let time = chrono::Utc::now();
     let faces = det.process(buffer)?;
-    if faces.len() == 0 {
+    if faces.is_empty() {
         return Ok(());
     }
 
     for face in faces {
-        if let Err(_) = tx.send((face, time)).await {
+        if (tx.send((face, time)).await).is_err() {
             println!("Dropped message...");
             break;
         }
@@ -167,7 +170,7 @@ fn get_cam(x: u32, y: u32, fps: u32, v: bool) -> anyhow::Result<(Camera, NonZero
     let x = NonZeroU32::new(x).ok_or(anyhow::anyhow!("Unable to get proper camera x res"))?;
     let y = NonZeroU32::new(y).ok_or(anyhow::anyhow!("Unable to get proper camera y res"))?;
     if let Err(e) = cam.open_stream() {
-        println!("Failed to open camera stream with error {}", e.to_string());
+        println!("Failed to open camera stream with error {}", e);
         return Err(e.into());
     }
     if v {

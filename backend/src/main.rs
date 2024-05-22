@@ -1,6 +1,6 @@
+use std::env::var;
 use std::sync::Arc;
 
-// sample https://github.com/tokio-rs/axum/blob/main/examples/sqlx-postgres/src/main.rs
 use axum::{
     extract::{DefaultBodyLimit, Multipart, State},
     http::StatusCode,
@@ -24,23 +24,17 @@ type BoxResult<T> = Result<T, Box<dyn std::error::Error>>;
 async fn main() -> BoxResult<()> {
     tracing_subscriber::fmt::init();
 
-    let detector = UltrafaceDetector::new(Default::default(), "./models/ultraface-int8.onnx")?;
-    let generator = ArcFace::new("./models/arcface-int8.onnx")?;
+    let detector = UltrafaceDetector::new(Default::default(), &var("DETECTOR_PATH")?)?;
+    let generator = ArcFace::new(&var("EMBEDDER_PATH")?)?;
     let (_, _, dh, dw) = generator.dims();
     let detector = Detector::new(Box::new(detector), dw, dh);
-    // TODO sync constants, extract to env var / cli
-    const QUEUE: &str = "sign-ups";
-    let messenger = Messenger::new("amqp://127.0.0.1:5672/%2f", QUEUE.into()).await?;
-    let db = Database::new("postgres://postgres:postgres@localhost:5432", 5).await?;
-    const OBJECT_STORAGE_DEFAULT_URL: &str = "http://127.0.0.1:9000";
-    const OBJECT_STORAGE_DEFAULT_ACCESS_KEY: &str = "minioadmin";
-    const OBJECT_STORAGE_DEFAULT_SECRET_KEY: &str = "minioadmin";
-    const OBJECT_STORAGE_DEFAULT_BUCKET: &str = QUEUE;
+    let messenger = Messenger::new(&var("BUS_ADDRESS")?, var("SIGN_UP_QUEUE_NAME")?).await?;
+    let db = Database::new(&var("DB_CONN_STR")?, var("DB_MAX_CONNS")?.parse::<u32>()?).await?;
     let bucket = get_or_create_bucket(
-        OBJECT_STORAGE_DEFAULT_BUCKET,
-        OBJECT_STORAGE_DEFAULT_URL.into(),
-        OBJECT_STORAGE_DEFAULT_ACCESS_KEY,
-        OBJECT_STORAGE_DEFAULT_SECRET_KEY,
+        &var("S3_SIGN_UP_BUCKET")?,
+        var("S3_URL")?,
+        &var("S3_ACCESS_KEY")?,
+        &var("S3_SECRET_KEY")?,
     )
     .await?;
     let publisher = Arc::new(LabelPublisher::new(
@@ -79,6 +73,7 @@ async fn sign_up(
     mut multipart: Multipart,
 ) -> Result<String, (StatusCode, String)> {
     // TODO publish event, process elsewhere
+    info!("Received upload");
     let mut imgs: Vec<Vec<u8>> = vec![];
     let mut name: Option<String> = None;
     let mut email: Option<String> = None;

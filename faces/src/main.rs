@@ -1,5 +1,3 @@
-use std::sync::atomic;
-
 use clap::{arg, Args, Parser};
 use face_embed::path_utils::path_parser;
 use face_embed::{embedding::*, face_detector::*, *};
@@ -17,17 +15,6 @@ mod embed;
 // Defaults
 const ARCFACE_PATH: &str = "./models/arcface-int8.onnx";
 const ULTRAFACE_PATH: &str = "./models/ultraface-int8.onnx";
-const POSTGRES_CONN_STR: &str = "postgres://postgres:postgres@localhost:5432";
-const TABLE_NAME: &str = "items";
-const RABBITMQ_DEFAULT_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
-const RABBITMQ_DEFAULT_QUEUE: &str = "embed-events";
-const OBJECT_STORAGE_DEFAULT_URL: &str = "http://127.0.0.1:9000";
-const OBJECT_STORAGE_DEFAULT_ACCESS_KEY: &str = "minioadmin";
-const OBJECT_STORAGE_DEFAULT_SECRET_KEY: &str = "minioadmin";
-const OBJECT_STORAGE_DEFAULT_BUCKET: &str = "feed";
-
-// Global shutdown
-// pub(crate) static SHUTDOWN_REQUESTED: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -85,36 +72,32 @@ pub(crate) struct EmbedArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct MessageBusArgs {
-    #[arg(short, long, default_value = RABBITMQ_DEFAULT_ADDR, env)]
-    address: String,
-    #[arg(short, long, default_value = RABBITMQ_DEFAULT_QUEUE, env)]
-    queue_name: String,
+    #[arg(short, long, env)]
+    bus_address: String,
+    #[arg(short, long, env)]
+    live_queue_name: String,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct DatabaseArgs {
     /// The Postgresql database connection string.
-    #[arg(short, long, default_value = POSTGRES_CONN_STR, env)]
-    conn_str: String,
-
-    #[arg(short, long, default_value = TABLE_NAME, env)]
-    /// The table name in the postgresql database.
-    table_name: String,
+    #[arg(long, env)]
+    db_conn_str: String,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct S3Args {
-    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_URL, env)]
-    url: String,
+    #[arg(long, env)]
+    s3_url: String,
 
-    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_ACCESS_KEY, env)]
-    access_key: String,
+    #[arg(long, env)]
+    s3_access_key: String,
 
-    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_SECRET_KEY, env)]
-    secret_key: String,
+    #[arg(long, env)]
+    s3_secret_key: String,
 
-    #[arg(long, default_value = OBJECT_STORAGE_DEFAULT_BUCKET, env)]
-    bucket: String,
+    #[arg(long, env)]
+    s3_live_bucket: String,
 }
 
 #[derive(Args, Debug)]
