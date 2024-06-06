@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO items (embedding, time)\n        (SELECT * FROM UNNEST ($1::vector(512)[], $2::timestamptz[]))\n        RETURNING id, time",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "time",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        {
+          "Custom": {
+            "name": "_vector",
+            "kind": {
+              "Array": {
+                "Custom": {
+                  "name": "vector",
+                  "kind": "Simple"
+                }
+              }
+            }
+          }
+        },
+        "TimestamptzArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "681dd3af8b7e79d4c3df2634acfbb5fa85f779718927da4904a5e39c5348bc5a"
+}

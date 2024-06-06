@@ -8,10 +8,11 @@ use face_embed::{
     storage::get_or_create_bucket,
 };
 use imgref::{ImgRef, ImgVec};
-use nokhwa::{
-    pixel_format::RgbFormat,
-    utils::{CameraFormat, CameraIndex, RequestedFormat, Resolution},
-    Camera,
+use opencv::videoio::VideoCapture;
+use opencv::{
+    core::Vector,
+    prelude::*,
+    videoio::{VideoCaptureProperties::*, CAP_ANY},
 };
 use tokio::sync::mpsc::Sender;
 
@@ -111,18 +112,28 @@ async fn process_feed(
     token: CancellationToken,
     v: bool,
 ) -> anyhow::Result<()> {
-    let (mut cam, x, y) = get_cam(src_x, src_y, src_fps, v)?;
-    let mut buffer: Vec<u8> = vec![0; (y.get() * x.get() * 3) as usize];
-    while !token.is_cancelled() {
-        let slice = buffer.as_mut_slice();
-        if cam.write_frame_to_buffer::<RgbFormat>(slice).is_err() {
-            break;
-        }
-        let imgref = bytes_as_imgref(slice, x.get() as _, y.get() as _)?;
-        embed_frame(&tx, imgref, &mut det).await?;
+    let mut cam = VideoCapture::new(0, CAP_ANY)?;
+    let mut vec: Vector<i32> = Vector::new();
+    vec.push(CAP_PROP_FPS.into());
+    vec.push(src_fps as _);
+    vec.push(CAP_PROP_FRAME_WIDTH.into());
+    vec.push(src_x as _);
+    vec.push(CAP_PROP_FRAME_HEIGHT.into());
+    vec.push(src_y as _);
+    cam.open_with_params(0, CAP_ANY, &vec)?;
+    if !opencv::videoio::VideoCapture::is_opened(&cam)? {
+        anyhow::bail!(
+            "Failed to open camera with specified parameters w: {}, h: {}, fps: {}!",
+            src_x,
+            src_y,
+            src_fps
+        );
     }
-    if cam.is_stream_open() {
-        cam.stop_stream()?;
+    while !token.is_cancelled() {
+        let mut frame = Mat::default();
+        cam.read(&mut frame)?;
+        let imgref = mat_to_imgref(&frame);
+        embed_frame(&tx, imgref, &mut det).await?;
     }
     Ok(())
 }
@@ -147,39 +158,8 @@ async fn embed_frame<'a>(
     Ok(())
 }
 
-fn get_cam(x: u32, y: u32, fps: u32, v: bool) -> anyhow::Result<(Camera, NonZeroU32, NonZeroU32)> {
-    if v {
-        println!("Initializing camera...");
-    }
-    let i = CameraIndex::Index(0);
-    let req = RequestedFormat::new::<RgbFormat>(nokhwa::utils::RequestedFormatType::Closest(
-        CameraFormat::new(
-            Resolution {
-                width_x: x,
-                height_y: y,
-            },
-            nokhwa::utils::FrameFormat::MJPEG,
-            fps,
-        ),
-    ));
-    let mut cam = Camera::new(i, req)?;
-    let Resolution {
-        width_x: x,
-        height_y: y,
-    } = cam.resolution();
-    let x = NonZeroU32::new(x).ok_or(anyhow::anyhow!("Unable to get proper camera x res"))?;
-    let y = NonZeroU32::new(y).ok_or(anyhow::anyhow!("Unable to get proper camera y res"))?;
-    if let Err(e) = cam.open_stream() {
-        println!("Failed to open camera stream with error {}", e);
-        return Err(e.into());
-    }
-    if v {
-        println!(
-            "Setup camera with resolution ({}, {}) at {} fps.",
-            x.get(),
-            y.get(),
-            cam.frame_rate()
-        );
-    }
-    Ok((cam, x, y))
+fn mat_to_imgref(mat: &Mat) -> ImgRef<'_, [u8; 3]> {
+    let slice = mat.data_bytes().expect("Expected contigous mat");
+    bytes_as_imgref(slice, mat.cols() as _, mat.rows() as _)
+        .expect("Failed to create view into buffer.")
 }

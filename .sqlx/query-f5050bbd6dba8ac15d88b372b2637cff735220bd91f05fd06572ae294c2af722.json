@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT * FROM (SELECT ((classes.signature <#> (SELECT embedding FROM items WHERE id = $1)) * -1) as similarity, users.*, classes.id as class_id\n            FROM classes JOIN users on classes.user_id=users.id\n            WHERE classes.user_id IS NOT NULL\n            ORDER BY similarity\n            LIMIT 1)\n            WHERE similarity > $2;\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "similarity",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "email",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "class_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      null,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f5050bbd6dba8ac15d88b372b2637cff735220bd91f05fd06572ae294c2af722"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO classes (signature, user_id, path) VALUES ($1, $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        {
+          "Custom": {
+            "name": "vector",
+            "kind": "Simple"
+          }
+        },
+        "Int8",
+        "Bpchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9f1a58e2876d028c3bdc0f692525116a08e6fc61b1bcf689d2892dd0bf8d326d"
+}
