@@ -10,10 +10,10 @@ use axum::{
 use face_embed::{
     db::{Database, User},
     embedding::ArcFace,
-    face_detector::{ModelDims, UltrafaceDetector},
+    face_detector::UltrafaceDetector,
     messaging::Messenger,
-    pipeline::{Detector, LabelPublisher},
-    storage::get_or_create_bucket,
+    pipeline::LabelPublisher,
+    storage::get_or_create_bucket
 };
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
@@ -26,9 +26,9 @@ async fn main() -> BoxResult<()> {
 
     let detector = UltrafaceDetector::new(Default::default(), &var("DETECTOR_PATH")?)?;
     let generator = ArcFace::new(&var("EMBEDDER_PATH")?)?;
-    let (_, _, dh, dw) = generator.dims();
-    let detector = Detector::new(Box::new(detector), dw, dh);
-    let messenger = Messenger::new(&var("BUS_ADDRESS")?, var("SIGN_UP_QUEUE_NAME")?).await?;
+    let detector = Box::new(detector);
+    let messenger =
+        Messenger::new_connection(&var("BUS_ADDRESS")?, var("SIGN_UP_QUEUE_NAME")?).await?;
     let db = Database::new(&var("DB_CONN_STR")?, var("DB_MAX_CONNS")?.parse::<u32>()?).await?;
     let bucket = get_or_create_bucket(
         &var("S3_SIGN_UP_BUCKET")?,
@@ -40,9 +40,10 @@ async fn main() -> BoxResult<()> {
     let publisher = Arc::new(LabelPublisher::new(
         detector,
         Box::new(generator),
+        "Arcface-8".into(),
         db,
-        messenger,
         bucket,
+        messenger,
     ));
 
     let state = AppState { publisher };

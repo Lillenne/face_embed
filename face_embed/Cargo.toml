@@ -8,9 +8,9 @@ fast_image_resize = "3.0.4"
 image = "0.25"
 ndarray = "0.15.6"
 num-traits = "0.2.18"
-ort = "2.0.0-rc.1"
+ort = { version = "2.0.0-rc.1", optional = true }
 base64 = "0.22.0"
-uuid = { version = "1.8.0", features = ["v7"] }
+uuid = { version = "1.8.0", features = ["v7", "serde"] }
 rand = "0.8.5"
 anyhow = "1.0.80"
 pgvector = { version = "0.3", features = ["sqlx"] }
@@ -26,18 +26,16 @@ clap = { version = "4.5.2", features = ["derive"] }
 rayon = "1.9.0"
 lapin = "2.3.1"
 serde = { version = "1.0.197", features = ["derive"] }
-rmp-serde = "1.1.2"
 chrono = { version = "0.4.35", features = ["serde"] }
 imgref = "1.10.1"
 bytemuck = "1.15.0"
 async-trait = "0.1.80"
+serde_json = "1.0.127"
 
 [dependencies.rust-s3]
 version = "0.33.0"
 default-features = false
 features = ["tokio-rustls-tls"]
 
-[dependencies.nokhwa]
-git = "https://github.com/l1npengtul/nokhwa.git"
-rev = "ea971242a888987222375189fb78c84fa85e5a4e"
-features = ["input-native"]
+[features]
+ort = ["dep:ort"]

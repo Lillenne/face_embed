@@ -5,8 +5,16 @@ use lapin::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::db::User;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CaptureEvent {
+    pub id: Uuid,
+    pub time: DateTime<Utc>,
+    pub path: String,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DetectionEvent {
@@ -24,28 +32,48 @@ pub struct LabelEvent {
     pub signatures: Vec<Vec<f32>>,
 }
 
+#[derive(Clone)]
 pub struct Messenger {
-    queue_name: String,
     channel: Channel,
+    queue_name: String,
 }
 
 impl Messenger {
-    pub async fn new(address: &str, queue_name: String) -> anyhow::Result<Self> {
+    pub async fn new_connection(address: &str, queue_name: String) -> anyhow::Result<Self> {
         let conn = Connection::connect(address, ConnectionProperties::default()).await?;
-
         let channel = conn.create_channel().await?;
-        _ = channel
+
+        Ok(Messenger {
+            channel,
+            queue_name,
+        })
+    }
+
+    pub async fn new_channel(conn: &Connection, queue_name: String) -> anyhow::Result<Self> {
+        let channel = conn.create_channel().await?;
+        Ok(Messenger {
+            channel,
+            queue_name,
+        })
+    }
+
+    pub async fn from_channel(channel: Channel, queue_name: String) -> Self {
+        Messenger {
+            channel,
+            queue_name,
+        }
+    }
+
+    pub async fn queue_declare(&self) -> anyhow::Result<()> {
+        let _queue = self
+            .channel
             .queue_declare(
-                &queue_name,
+                &self.queue_name,
                 QueueDeclareOptions::default(),
                 FieldTable::default(),
             )
             .await?;
-
-        Ok(Messenger {
-            queue_name,
-            channel,
-        })
+        Ok(())
     }
 
     pub async fn publish(&self, payload: &[u8]) -> anyhow::Result<()> {
@@ -62,18 +90,13 @@ impl Messenger {
         Ok(())
     }
 
-    pub async fn get_consumer(
-        &self,
-        consumer_tag: &str,
-        consume_options: Option<BasicConsumeOptions>,
-        field_table: Option<FieldTable>,
-    ) -> Result<Consumer, lapin::Error> {
+    pub async fn get_consumer(&self, consumer_tag: &str) -> Result<Consumer, lapin::Error> {
         self.channel
             .basic_consume(
                 &self.queue_name,
                 consumer_tag,
-                consume_options.unwrap_or_default(),
-                field_table.unwrap_or_default(),
+                BasicConsumeOptions::default(),
+                FieldTable::default(),
             )
             .await
     }

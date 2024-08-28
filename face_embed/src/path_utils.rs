@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use anyhow::bail;
+
 pub fn expand_path(path: &str) -> anyhow::Result<String> {
     let path = Path::new(path);
     if path.is_relative() {
@@ -11,15 +13,15 @@ pub fn expand_path(path: &str) -> anyhow::Result<String> {
             if let Some(str) = path.as_os_str().to_str() {
                 Ok(str.into())
             } else {
-                Err(anyhow::anyhow!("Failed to get relative path: {:?}", path))
+                bail!("Failed to get relative path: {:?}", path)
             }
         } else {
-            Err(anyhow::anyhow!("Failed to get relative path"))
+            bail!("Failed to get relative path")
         }
     } else if let Some(str) = path.to_str() {
         Ok(str.to_string())
     } else {
-        Err(anyhow::anyhow!("Path contains invalid characters"))
+        bail!("Path contains invalid characters")
     }
 }
 
@@ -28,6 +30,6 @@ pub fn path_parser(path: &str) -> anyhow::Result<String> {
     if Path::new(path.as_str()).exists() {
         Ok(path)
     } else {
-        Err(anyhow::anyhow!("Path does not exist!"))
+        bail!("Path does not exist!")
     }
 }

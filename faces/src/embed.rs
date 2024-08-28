@@ -1,90 +1,91 @@
-pub(crate) use std::num::NonZeroU32;
-
-use crate::cache::SlidingVectorCache;
+use anyhow::bail;
 use face_embed::{
-    db::Database,
-    messaging::Messenger,
-    pipeline::{bytes_as_imgref, Detector, LivePublisher},
+    messaging::{self, Messenger},
     storage::get_or_create_bucket,
+    DetectedObject, Rect,
 };
-use imgref::{ImgRef, ImgVec};
-use opencv::videoio::VideoCapture;
+use messaging::CaptureEvent;
 use opencv::{
-    core::Vector,
+    core::{Size, Vector},
+    imgcodecs::imencode,
+    imgproc,
+    objdetect::{self, CascadeClassifier},
     prelude::*,
-    videoio::{VideoCaptureProperties::*, CAP_ANY},
+    videoio::{VideoCapture, VideoCaptureProperties::*, CAP_ANY},
 };
 use tokio::sync::mpsc::Sender;
+use tracing::{error, info, trace, warn};
+use uuid::Uuid;
 
 use crate::*;
 
-type FaceTimeStamp = (ImgVec<[u8; 3]>, chrono::DateTime<chrono::Utc>);
+type FaceTimeStamp = (chrono::DateTime<chrono::Utc>, Mat, Vec<DetectedObject>);
 
 pub(crate) async fn embed(args: EmbedArgs, token: CancellationToken) -> anyhow::Result<()> {
-    let arcface = Box::new(ArcFace::new(args.embedder_path.as_str())?);
-    let (_, _, h, w) = arcface.dims();
-    let uf_cfg = UltrafaceDetectorConfig {
-        top_k: NonZeroU32::new(3).unwrap(),
-        ..Default::default()
-    };
-    let det = Detector::new(
-        Box::new(UltrafaceDetector::new(uf_cfg, &args.detector_path)?),
-        w,
-        h,
-    );
-
-    let (tx, mut rx) = mpsc::channel(args.channel_bound);
+    let (tx, mut rx) = mpsc::channel::<FaceTimeStamp>(args.channel_bound);
     let token_clone = token.clone();
     let embed_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-        let db = Database::new(&args.database.db_conn_str, 50).await?;
-        let messenger = Messenger::new(
+        info!("Initializing message bus connection...");
+        let messenger = Messenger::new_connection(
             &args.message_bus.bus_address,
-            args.message_bus.live_queue_name,
+            args.message_bus.capture_queue_name,
         )
-        .await?;
+        .await;
+        if messenger.is_err() {
+            let reason = "Failed to initialize message bus connection!";
+            error!(reason);
+            token_clone.cancel();
+            bail!(reason);
+        }
+        let messenger = messenger.unwrap();
+        messenger.queue_declare().await?;
+        info!("Message bus connection initialized.");
+
+        info!("Initializing remote storage...");
         let bucket = get_or_create_bucket(
-            &args.storage.s3_live_bucket,
+            &args.storage.s3_capture_bucket,
             args.storage.s3_url,
             &args.storage.s3_access_key,
             &args.storage.s3_secret_key,
         )
-        .await?;
-        let cache_duration = std::time::Duration::from_secs(args.cache_duration_seconds);
-        let cache = SlidingVectorCache::new(cache_duration, args.similarity_threshold);
-        let mut publisher = LivePublisher::new(
-            arcface,
-            messenger,
-            db,
-            bucket,
-            cache,
-            args.similarity_threshold,
-        );
+        .await;
+        if bucket.is_err() {
+            let reason = "Failed to initialize remote storage!";
+            error!(reason);
+            token_clone.cancel();
+            bail!(reason);
+        }
+        let bucket = bucket.unwrap();
+        info!("Remote storage initialized...");
 
-        let mut buf: Vec<FaceTimeStamp> = vec![];
-        loop {
-            let n_rec = rx.recv_many(&mut buf, 40).await;
-            if n_rec == 0 || token_clone.is_cancelled() {
-                break;
+        info!("Beginning processing loop");
+        while let Some((time, mat, _)) = tokio::select!(
+            v = rx.recv() => v,
+            _ = token_clone.cancelled() => {
+                info!("Aborted publishing loop due to cancellation request.");
+                None
             }
-
-            // TODO remove intermediate allocation
-            let mut refs = vec![];
-            for owned in buf.iter() {
-                refs.push((owned.0.as_ref(), owned.1))
-            }
-
-            tokio::select!(
-                val = publisher.process_many(refs.as_slice()) => {
-                    if val.is_err() {
-                        break;
-                    }
-                }
-                _ = token_clone.cancelled() => {
-                    break;
-                }
+        ) {
+            let mut jpg = Vector::<u8>::new();
+            let flags = Vector::<i32>::new();
+            imencode(".jpg", &mat, &mut jpg, &flags)?;
+            let id = Uuid::now_v7();
+            let mut path = String::new();
+            path.push('/');
+            path.push_str(&id.to_string());
+            bucket
+                .put_object_stream_with_content_type(&mut jpg.as_slice(), &path, "image/jpeg")
+                .await?;
+            bucket
+                .put_object_tagging(&path, &[("time", &time.to_string()), ("model", "haar")])
+                .await?;
+            let event = CaptureEvent { id, time, path };
+            let payload = serde_json::to_vec_pretty(&event)?;
+            messenger.publish(&payload).await?;
+            info!(
+                "Published event: id={}, time={}, path={}",
+                &event.id, &event.time, &event.path
             );
-
-            buf.clear();
         }
         Ok(())
     });
@@ -94,9 +95,8 @@ pub(crate) async fn embed(args: EmbedArgs, token: CancellationToken) -> anyhow::
         args.source.y_res,
         args.source.fps,
         tx,
-        det,
+        HaarDetector::new(&args.haar_path, 4)?,
         token,
-        args.verbose,
     )
     .await?;
     embed_task.await??;
@@ -108,9 +108,8 @@ async fn process_feed(
     src_y: u32,
     src_fps: u32,
     tx: Sender<FaceTimeStamp>,
-    mut det: Detector,
+    mut det: HaarDetector,
     token: CancellationToken,
-    v: bool,
 ) -> anyhow::Result<()> {
     let mut cam = VideoCapture::new(0, CAP_ANY)?;
     let mut vec: Vector<i32> = Vector::new();
@@ -129,37 +128,90 @@ async fn process_feed(
             src_fps
         );
     }
+    info!(
+        "Opened camera with parameters w: {}, h: {}, fps: {}!",
+        src_x, src_y, src_fps
+    );
+
     while !token.is_cancelled() {
         let mut frame = Mat::default();
         cam.read(&mut frame)?;
-        let imgref = mat_to_imgref(&frame);
-        embed_frame(&tx, imgref, &mut det).await?;
-    }
-    Ok(())
-}
-
-async fn embed_frame<'a>(
-    tx: &tokio::sync::mpsc::Sender<FaceTimeStamp>,
-    buffer: ImgRef<'a, [u8; 3]>,
-    det: &mut Detector,
-) -> anyhow::Result<()> {
-    let time = chrono::Utc::now();
-    let faces = det.process(buffer)?;
-    if faces.is_empty() {
-        return Ok(());
-    }
-
-    for face in faces {
-        if (tx.send((face, time)).await).is_err() {
-            println!("Dropped message...");
-            break;
+        let time = chrono::Utc::now();
+        if frame.empty() {
+            bail!("Read an empty frame.")
         }
+        if frame.typ() != 16 {
+            bail!("Video stream must be 8-bit color.")
+        }
+
+        let faces = det.detect(&frame)?;
+        if faces.is_empty() {
+            continue;
+        }
+        trace!("Detected {} faces", faces.len());
+
+        if tx.send((time, frame, faces)).await.is_err() {
+            warn!("Dropped message...");
+        };
     }
     Ok(())
 }
 
-fn mat_to_imgref(mat: &Mat) -> ImgRef<'_, [u8; 3]> {
-    let slice = mat.data_bytes().expect("Expected contigous mat");
-    bytes_as_imgref(slice, mat.cols() as _, mat.rows() as _)
-        .expect("Failed to create view into buffer.")
+struct HaarDetector {
+    classifer: CascadeClassifier,
+    scale_factor: u32,
+}
+
+impl HaarDetector {
+    pub fn new(path: &str, scale_factor: u32) -> anyhow::Result<Self> {
+        let s = if scale_factor == 0 { 1 } else { scale_factor };
+        println!("path: {}", path);
+        Ok(HaarDetector {
+            classifer: opencv::objdetect::CascadeClassifier::new(path)?,
+            scale_factor: s,
+        })
+    }
+
+    fn detect(&mut self, frame: &Mat) -> anyhow::Result<Vec<DetectedObject>> {
+        let mut gray = Mat::default();
+        imgproc::cvt_color_def(&frame, &mut gray, imgproc::COLOR_BGR2GRAY)?;
+        let mut reduced = Mat::default();
+        let factor = 1.0 / self.scale_factor as f64;
+        imgproc::resize(
+            &gray,
+            &mut reduced,
+            Size::new(0, 0),
+            factor,
+            factor,
+            imgproc::INTER_LINEAR,
+        )?;
+        let mut faces = Vector::new();
+        self.classifer.detect_multi_scale(
+            &reduced,
+            &mut faces,
+            1.1,
+            2,
+            objdetect::CASCADE_SCALE_IMAGE,
+            Size::new(30, 30),
+            Size::new(0, 0),
+        )?;
+        let size = reduced.size()?;
+        Ok(faces
+            .iter()
+            .map(|face| DetectedObject {
+                confidence: 1.0,
+                class: 1,
+                bounding_box: Rect {
+                    left: face.x as f32 / size.width as f32,
+                    top: face.y as f32 / size.height as f32,
+                    width: face.width as f32 / size.width as f32,
+                    height: face.height as f32 / size.height as f32,
+                },
+            })
+            // opencv::core::Rect::new(face.x * self.scale_factor,
+            //                  face.y * self.scale_factor,
+            //                  face.width * self.scale_factor,
+            //                  face.height * self.scale_factor)))
+            .collect::<Vec<_>>())
+    }
 }

@@ -1,21 +1,6 @@
 use std::num::NonZeroU32;
 
-use crate::face_detector::ModelDims;
-
-/// Defines an embedding generating algorithm
-pub trait EmbeddingGenerator: ModelDims {
-    /// Generates embeddings from an image
-    fn generate_embedding(&self, face: &[u8]) -> anyhow::Result<Vec<f32>>;
-}
-
-pub fn similarity<T: num_traits::Float>(embedding: &[T], nearest_embed: &[T]) -> T {
-    embedding
-        .iter()
-        .zip(nearest_embed.iter())
-        .map(|(a, b)| *a * *b)
-        .reduce(|a, b| a + b)
-        .unwrap()
-}
+use crate::{EmbeddingGenerator, ModelDims};
 
 pub struct ArcFace {
     model: ort::Session,
@@ -89,10 +74,11 @@ impl EmbeddingGenerator for ArcFace {
 
 #[cfg(test)]
 mod tests {
-    use super::similarity;
-    use crate::embedding::{ArcFace, EmbeddingGenerator};
-    use crate::face_detector::*;
+    use super::ArcFace;
     use crate::image_utils::{crop_and_resize, resize};
+    use crate::similarity;
+    use crate::EmbeddingGenerator;
+    use crate::{face_detector::*, FaceDetector};
     use fast_image_resize as fr;
     use image::EncodableLayout;
     use std::num::NonZeroU32;

@@ -56,7 +56,7 @@ impl Database {
             .execute(&pool)
             .await?;
         sqlx::query!("CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY, name VARCHAR(40) NOT NULL, email VARCHAR(40) NOT NULL)").execute(&pool).await?;
-        sqlx::query!("CREATE TABLE IF NOT EXISTS classes (id BIGSERIAL PRIMARY KEY, signature VECTOR(512) NOT NULL, path CHAR(37) NOT NULL, user_id BIGINT REFERENCES users(id))").execute(&pool).await?; // labels table
+        sqlx::query!("CREATE TABLE IF NOT EXISTS classes (id BIGSERIAL PRIMARY KEY, signature VECTOR(512) NOT NULL, path CHAR(37) NOT NULL, model VARCHAR(40), user_id BIGINT REFERENCES users(id))").execute(&pool).await?; // labels table
         sqlx::query!("CREATE TABLE IF NOT EXISTS items (id BIGSERIAL PRIMARY KEY, embedding VECTOR(512) NOT NULL, time TIMESTAMPTZ NOT NULL, class_id BIGINT REFERENCES classes(id) NULL)").execute(&pool).await?;
         sqlx::query!(
             "CREATE INDEX IF NOT EXISTS idx ON items USING hnsw (embedding vector_ip_ops)"
@@ -149,6 +149,7 @@ RETURNING id ",
         email: String,
         signatures: &[Vector],
         paths: &[String],
+        model: &str,
     ) -> anyhow::Result<i64> {
         let record = sqlx::query!(
             "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id",
@@ -159,10 +160,11 @@ RETURNING id ",
         .await?;
         for (signature, path) in signatures.iter().zip(paths.iter()) {
             _ = sqlx::query!(
-                "INSERT INTO classes (signature, user_id, path) VALUES ($1, $2, $3)",
+                "INSERT INTO classes (signature, user_id, path, model) VALUES ($1, $2, $3, $4)",
                 *signature as _,
                 record.id,
-                *path
+                *path,
+                model
             )
             .execute(&self.pool)
             .await?;

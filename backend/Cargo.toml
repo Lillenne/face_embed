@@ -10,5 +10,5 @@ axum = { version = "0.7.5", features = ["multipart"] }
 tokio = "1.37.0"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
-face_embed = { path = "../face_embed" }
+face_embed = { path = "../face_embed", features = ["ort"] }
 image = "0.25"

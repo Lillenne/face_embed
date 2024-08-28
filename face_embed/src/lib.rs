@@ -1,16 +1,55 @@
 pub mod cache;
 pub mod db;
+#[cfg(feature = "ort")]
 pub mod embedding;
+#[cfg(feature = "ort")]
 pub mod face_detector;
 pub mod image_utils;
 pub mod messaging;
 pub mod path_utils;
 pub mod pipeline;
 pub mod storage;
+use std::num::NonZeroU32;
+
 use fast_image_resize as fr;
 
+#[cfg(feature = "ort")]
 pub use ort;
-pub use rmp_serde;
+
+pub trait ModelDims {
+    /// Returns the model dimensions (b,c,h,w)
+    fn dims(&self) -> (NonZeroU32, NonZeroU32, NonZeroU32, NonZeroU32);
+}
+
+/// Defines a face detection algorithm
+pub trait FaceDetector: ModelDims {
+    /// Detects faces in an RGB image.
+    fn detect(&self, frame: &[u8]) -> anyhow::Result<Vec<DetectedObject>>;
+}
+
+/// Defines an embedding generating algorithm
+pub trait EmbeddingGenerator: ModelDims {
+    /// Generates embeddings from an image
+    fn generate_embedding(&self, face: &[u8]) -> anyhow::Result<Vec<f32>>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DetectedObject {
+    /// The index of the output class with the highest probability
+    pub class: usize,
+    /// The predicted likelihood
+    pub confidence: f32,
+    pub bounding_box: Rect,
+}
+
+pub fn similarity<T: num_traits::Float>(embedding: &[T], nearest_embed: &[T]) -> T {
+    embedding
+        .iter()
+        .zip(nearest_embed.iter())
+        .map(|(a, b)| *a * *b)
+        .reduce(|a, b| a + b)
+        .unwrap()
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ZeroToOneF32 {

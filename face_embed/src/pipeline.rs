@@ -1,16 +1,14 @@
-use std::{io::Cursor, num::NonZeroU32, time::Instant};
+use std::{borrow::Borrow, fmt::Display, io::Cursor, num::NonZeroU32, time::Instant};
 
 use crate::{
     cache::SlidingVectorCache,
     db::{Database, EmbeddingTime, User},
-    embedding::EmbeddingGenerator,
-    face_detector::FaceDetector,
     messaging::{DetectionEvent, LabelEvent, Messenger},
+    EmbeddingGenerator, FaceDetector, ModelDims,
 };
 use chrono::{DateTime, Utc};
 use fast_image_resize as fr;
 use fr::{CropBox, DynamicImageView};
-use image::io::Reader as ImageReader;
 use image::{ImageBuffer, Rgb};
 use imgref::*;
 use pgvector::Vector;
@@ -19,96 +17,20 @@ use s3::Bucket;
 use tokio::io::AsyncRead;
 use uuid::Uuid;
 
-pub struct Detector {
-    detector: Box<dyn FaceDetector + Send + Sync>,
-    embedder_width: NonZeroU32,
-    embedder_height: NonZeroU32,
-}
-
-impl Detector {
-    pub fn new(
-        detector: Box<dyn FaceDetector + Send + Sync>,
-        embedder_width: NonZeroU32,
-        embedder_height: NonZeroU32,
-    ) -> Self {
-        Self {
-            detector,
-            embedder_width,
-            embedder_height,
-        }
-    }
-
-    pub fn process(&self, data: ImgRef<[u8; 3]>) -> anyhow::Result<Vec<ImgVec<[u8; 3]>>> {
-        let (db, _, dh, dw) = self.detector.dims();
-        if db.get() != 1 {
-            anyhow::bail!(
-                "Face detector implementation requires batch size {}",
-                db.get()
-            )
-        }
-        let output = if data.width() == data.stride()
-            && dw.get() == data.width() as u32
-            && dh.get() == data.height() as u32
-        {
-            // Already the right size
-            let input = to_bytes(data);
-            self.detector.detect(input)
-        } else {
-            // need to resize
-            let cbox = CropBox {
-                left: 0.0,
-                top: 0.0,
-                width: data.width() as _,
-                height: data.height() as _,
-            };
-            let rsz = crop_and_resize(data, cbox, dw, dh)?;
-            self.detector.detect(rsz.as_slice())
-        }?;
-        let mut collect = vec![];
-        for object in output {
-            let cbox = object
-                .bounding_box
-                .to_crop_box(data.width() as _, data.height() as _);
-            let embed_input = self.resize_for_embedding(data, cbox)?;
-            collect.push(embed_input);
-        }
-        Ok(collect)
-    }
-
-    fn resize_for_embedding(
-        &self,
-        data: ImgRef<[u8; 3]>,
-        crop: CropBox,
-    ) -> anyhow::Result<ImgVec<[u8; 3]>> {
-        let bytes = to_bytes(data);
-        let mut src_view = fr::ImageView::from_buffer(
-            NonZeroU32::new(data.stride() as _).unwrap(),
-            NonZeroU32::new(data.height_padded() as _).unwrap(),
-            bytes,
-        )?;
-        src_view.set_crop_box(crop)?;
-        let src_view = DynamicImageView::U8x3(src_view);
-
-        let mut dst_image = fr::Image::new(
-            self.embedder_width,
-            self.embedder_height,
-            fr::PixelType::U8x3,
-        );
-        let mut resizer = fr::Resizer::new(fr::ResizeAlg::Convolution(fr::FilterType::Bilinear));
-        resizer.resize(&src_view, &mut dst_image.view_mut())?;
-        let vec = dst_image.into_vec();
-        let vec = bytemuck::cast_vec::<u8, [u8; 3]>(vec);
-        let img = ImgVec::new(
-            vec,
-            self.embedder_width.get() as _,
-            self.embedder_height.get() as _,
-        );
-        Ok(img)
-    }
+#[derive(Debug)]
+pub enum PublisherError {
+    IncorrectInputDimensions,
+    EmbeddingNotUnique,
+    FaceDetectorError(anyhow::Error),
+    EmbedderError(anyhow::Error),
+    DatabaseError(anyhow::Error),
+    MessageBusError(anyhow::Error),
+    TODO(anyhow::Error),
 }
 
 pub struct LivePublisher {
     generator: Box<dyn EmbeddingGenerator + Send + Sync>,
+    generator_tag: String,
     messenger: Messenger,
     database: Database,
     bucket: Bucket,
@@ -119,6 +41,7 @@ pub struct LivePublisher {
 impl LivePublisher {
     pub fn new(
         generator: Box<dyn EmbeddingGenerator + Send + Sync>,
+        generator_tag: String,
         messenger: Messenger,
         database: Database,
         bucket: Bucket,
@@ -127,6 +50,7 @@ impl LivePublisher {
     ) -> Self {
         Self {
             generator,
+            generator_tag,
             messenger,
             database,
             bucket,
@@ -139,17 +63,20 @@ impl LivePublisher {
         &mut self,
         data: ImgRef<'a, [u8; 3]>,
         time: DateTime<Utc>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PublisherError> {
         let embedding = self.embed(data, time)?;
-        self.publish(data, embedding).await?;
-        Ok(())
+
+        match self.publish(data, embedding).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(PublisherError::TODO(e)),
+        }
     }
 
     pub async fn process_many<'a>(
         &mut self,
         data: &[(ImgRef<'a, [u8; 3]>, DateTime<Utc>)],
     ) -> anyhow::Result<()> {
-        let embeds = self.embed_many(data)?;
+        let embeds = embed_many(data, &self.generator, &mut self.cache)?;
         let mut filtered_embeds = vec![];
         let mut imgs = vec![];
         for ((img, _), et) in data.iter().zip(embeds.into_iter()) {
@@ -166,12 +93,12 @@ impl LivePublisher {
         &mut self,
         data: ImgRef<[u8; 3]>,
         time: DateTime<Utc>,
-    ) -> anyhow::Result<EmbeddingTime> {
-        let item = self.create_embedding(data, time)?;
+    ) -> Result<EmbeddingTime, PublisherError> {
+        let item = create_embedding(&self.generator, data, time)?;
         if self.cache.push(Instant::now(), &item) {
             Ok(item)
         } else {
-            Err(anyhow::anyhow!("Embedding not unique!"))
+            Err(PublisherError::EmbeddingNotUnique)
         }
     }
 
@@ -181,7 +108,7 @@ impl LivePublisher {
     ) -> anyhow::Result<Vec<Option<EmbeddingTime>>> {
         let embeds: Vec<_> = data
             .par_iter()
-            .flat_map(|(buf, time)| self.create_embedding(*buf, *time))
+            .flat_map(|(buf, time)| create_embedding(&self.generator, *buf, *time))
             .collect();
         // intermediate collect since cache needs mutable access
         let filtered = embeds
@@ -229,7 +156,7 @@ impl LivePublisher {
                 similarity: 0.0,
             }
         };
-        let payload = rmp_serde::to_vec_named(&event)?;
+        let payload = serde_json::to_vec_pretty(&event)?;
         self.messenger.publish(payload.as_slice()).await?;
         Ok(())
     }
@@ -239,11 +166,9 @@ impl LivePublisher {
         imgs: &[ImgRef<'_, [u8; 3]>],
         data: Vec<EmbeddingTime>,
     ) -> anyhow::Result<()> {
-        let paths = push_jpgs(
-            imgs.iter().zip(data.iter().map(|et| &et.time)),
-            &self.bucket,
-        )
-        .await?;
+        let paths = self
+            .push_jpgs(imgs.iter().zip(data.iter().map(|et| &et.time)))
+            .await?;
         // TODO single query
         let ids = self.database.save_captured_embeddings_to_db(data).await?;
         for ((id, time), path) in ids.into_iter().zip(paths) {
@@ -263,28 +188,32 @@ impl LivePublisher {
                 user,
                 similarity,
             };
-            let payload = rmp_serde::to_vec_named(&event)?;
+            let payload = serde_json::to_vec_pretty(&event)?;
             self.messenger.publish(payload.as_slice()).await?;
         }
         Ok(())
     }
 
-    fn create_embedding(
+    async fn push_object<R: AsyncRead + Unpin>(
         &self,
-        buf: ImgRef<[u8; 3]>,
-        time: DateTime<Utc>,
-    ) -> anyhow::Result<EmbeddingTime> {
-        // Validate dimensions
-        let (_, _, dh, dw) = self.generator.dims();
-        if buf.width() != buf.stride()
-            || dw.get() != buf.width() as u32
-            || dh.get() != buf.height() as u32
-        {
-            return Err(anyhow::anyhow!("Incorrect input dimensions!"));
-        }
-        let embedding = self.generator.generate_embedding(to_bytes(buf))?;
-        let embedding = pgvector::Vector::from(embedding);
-        Ok(EmbeddingTime { embedding, time })
+        bytes: &mut R,
+        time: &DateTime<Utc>,
+    ) -> anyhow::Result<String> {
+        let mut guid = String::new();
+        guid.push('/');
+        guid.push_str(&Uuid::now_v7().to_string());
+        &self
+            .bucket
+            .put_object_stream_with_content_type(bytes, &guid, "image/jpeg")
+            .await?;
+        &self
+            .bucket
+            .put_object_tagging(
+                &guid,
+                &[("time", &time.to_string()), ("embed", &self.generator_tag)],
+            )
+            .await?;
+        Ok(guid)
     }
 
     /// Encodes images as JPG and pushes them to storage with new guids & timestamp tags
@@ -294,32 +223,48 @@ impl LivePublisher {
         time: &DateTime<Utc>,
     ) -> anyhow::Result<String> {
         let bytes = encode_jpg(Vec::<u8>::new(), buf)?;
-        push_object(&mut bytes.as_slice(), time, &self.bucket).await
+        self.push_object(&mut bytes.as_slice(), time).await
+    }
+
+    async fn push_jpgs<'a, V: Iterator<Item = (&'a ImgRef<'a, [u8; 3]>, &'a DateTime<Utc>)>>(
+        &self,
+        data: V,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut buffer: Vec<u8> = vec![];
+        let mut collect: Vec<String> = vec![];
+        for item in data {
+            buffer = encode_jpg(buffer, *item.0)?; // encode into buffer and return same buf
+            collect.push(self.push_object(&mut buffer.as_slice(), item.1).await?);
+        }
+        Ok(collect)
     }
 }
 
 pub struct LabelPublisher {
-    detector: Detector,
+    detector: Box<dyn FaceDetector + Send + Sync>,
     bucket: Bucket,
     db: Database,
-    generator: Box<dyn EmbeddingGenerator + Send + Sync>,
     messenger: Messenger,
+    generator: Box<dyn EmbeddingGenerator + Send + Sync>,
+    generator_tag: String,
 }
 
 impl LabelPublisher {
     pub fn new(
-        detector: Detector,
+        detector: Box<dyn FaceDetector + Send + Sync>,
         generator: Box<dyn EmbeddingGenerator + Send + Sync>,
+        generator_tag: String,
         db: Database,
-        messenger: Messenger,
         bucket: Bucket,
+        messenger: Messenger,
     ) -> Self {
         LabelPublisher {
             detector,
             bucket,
             db,
-            generator,
             messenger,
+            generator,
+            generator_tag,
         }
     }
 
@@ -327,14 +272,15 @@ impl LabelPublisher {
         let mut collect: Vec<Img<Vec<[u8; 3]>>> = vec![];
         for img in imgs {
             let cursor = Cursor::new(img.as_slice());
-            let decoded = ImageReader::new(cursor)
+            let decoded = image::ImageReader::new(cursor)
                 .with_guessed_format()?
                 .decode()?
                 .into_rgb8();
             let (w, h) = (decoded.width(), decoded.height());
             let buffer = decoded.into_raw();
             let imgref = bytes_as_imgref(buffer.as_slice(), w as _, h as _)?;
-            let mut faces = self.detector.process(imgref)?;
+            let (_, _, dest_h, dest_w) = self.generator.dims();
+            let mut faces = get_embedder_inputs(&self.detector, imgref, dest_w, dest_h)?;
             collect.append(&mut faces);
         }
         let refs: Vec<ImgRef<[u8; 3]>> = collect.iter().map(|item| item.as_ref()).collect();
@@ -373,6 +319,7 @@ impl LabelPublisher {
                 data.email.clone(),
                 sigs.as_slice(),
                 paths.as_slice(),
+                &self.generator_tag,
             )
             .await?;
 
@@ -385,7 +332,7 @@ impl LabelPublisher {
             user: User { id, ..data },
             signatures,
         };
-        let msg = rmp_serde::to_vec_named(&event)?;
+        let msg = serde_json::to_vec_pretty(&event)?;
         self.messenger.publish(msg.as_slice()).await?;
         Ok(())
     }
@@ -421,6 +368,117 @@ fn to_bytes(data: ImgRef<[u8; 3]>) -> &[u8] {
     bytemuck::cast_slice::<[u8; 3], u8>(data.buf())
 }
 
+fn create_embedding(
+    generator: &Box<dyn EmbeddingGenerator + Sync + Send>,
+    buf: ImgRef<[u8; 3]>,
+    time: DateTime<Utc>,
+) -> Result<EmbeddingTime, PublisherError> {
+    // Validate dimensions
+    let (_, _, dh, dw) = generator.dims();
+    if buf.width() != buf.stride()
+        || dw.get() != buf.width() as u32
+        || dh.get() != buf.height() as u32
+    {
+        return Err(PublisherError::IncorrectInputDimensions);
+    }
+    match generator.generate_embedding(to_bytes(buf)) {
+        Ok(embedding) => {
+            let embedding = pgvector::Vector::from(embedding);
+            Ok(EmbeddingTime { embedding, time })
+        }
+        Err(e) => Err(PublisherError::EmbedderError(e))
+    }
+}
+
+fn embed_many(
+    data: &[(ImgRef<'_, [u8; 3]>, DateTime<Utc>)],
+    embedder: &Box<dyn EmbeddingGenerator + Sync + Send>,
+    cache: &mut SlidingVectorCache<f32, EmbeddingTime>,
+) -> anyhow::Result<Vec<Option<EmbeddingTime>>> {
+    let embeds: Vec<_> = data
+        .par_iter()
+        .flat_map(|(buf, time)| create_embedding(embedder, *buf, *time))
+        .collect();
+    // intermediate collect since cache needs mutable access
+    let filtered = embeds
+        .into_iter()
+        .map(|item| {
+            if cache.push(Instant::now(), &item) {
+                Some(item)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<Option<EmbeddingTime>>>();
+    Ok(filtered)
+}
+
+pub fn get_embedder_inputs(
+    detector: &Box<dyn FaceDetector + Send + Sync>,
+    data: ImgRef<[u8; 3]>,
+    dest_w: NonZeroU32,
+    dest_h: NonZeroU32,
+) -> anyhow::Result<Vec<ImgVec<[u8; 3]>>> {
+    let (db, _, dh, dw) = detector.dims();
+    if db.get() != 1 {
+        anyhow::bail!(
+            "Face detector implementation requires batch size {}",
+            db.get()
+        )
+    }
+    let output = if data.width() == data.stride()
+        && dw.get() == data.width() as u32
+        && dh.get() == data.height() as u32
+    {
+        // Already the right size
+        let input = to_bytes(data);
+        detector.detect(input)
+    } else {
+        // need to resize
+        let cbox = CropBox {
+            left: 0.0,
+            top: 0.0,
+            width: data.width() as _,
+            height: data.height() as _,
+        };
+        let rsz = crop_and_resize(data, cbox, dw, dh)?;
+        detector.detect(rsz.as_slice())
+    }?;
+    let mut collect = vec![];
+    for object in output {
+        let cbox = object
+            .bounding_box
+            .to_crop_box(data.width() as _, data.height() as _);
+        let embed_input = resize_for_embedding(data, cbox, dest_w, dest_h)?;
+        collect.push(embed_input);
+    }
+    Ok(collect)
+}
+
+fn resize_for_embedding(
+    data: ImgRef<[u8; 3]>,
+    crop: CropBox,
+    w: NonZeroU32,
+    h: NonZeroU32,
+) -> anyhow::Result<ImgVec<[u8; 3]>> {
+    let bytes = to_bytes(data);
+    let mut src_view = fr::ImageView::from_buffer(
+        NonZeroU32::new(data.stride() as _).unwrap(),
+        NonZeroU32::new(data.height_padded() as _).unwrap(),
+        bytes,
+    )?;
+    src_view.set_crop_box(crop)?;
+    let src_view = DynamicImageView::U8x3(src_view);
+
+    let mut dst_image = fr::Image::new(w, h, fr::PixelType::U8x3);
+    let mut resizer = fr::Resizer::new(fr::ResizeAlg::Convolution(fr::FilterType::Bilinear));
+    resizer.resize(&src_view, &mut dst_image.view_mut())?;
+    let vec = dst_image.into_vec();
+    let vec = bytemuck::cast_vec::<u8, [u8; 3]>(vec);
+    let img = ImgVec::new(vec, w.get() as _, h.get() as _);
+    Ok(img)
+}
+
 fn encode_jpg(mut bytes: Vec<u8>, buf: ImgRef<[u8; 3]>) -> anyhow::Result<Vec<u8>> {
     let slice = buf.to_contiguous_buf(); // Copy shouldn't happen
     let b = slice.0.into_owned();
@@ -433,34 +491,4 @@ fn encode_jpg(mut bytes: Vec<u8>, buf: ImgRef<[u8; 3]>) -> anyhow::Result<Vec<u8
     let mut cursor = Cursor::new(&mut bytes);
     img.write_to(&mut cursor, image::ImageFormat::Jpeg)?;
     Ok(bytes)
-}
-
-async fn push_object<R: AsyncRead + Unpin>(
-    bytes: &mut R,
-    time: &DateTime<Utc>,
-    bucket: &Bucket,
-) -> anyhow::Result<String> {
-    let mut guid = String::new();
-    guid.push('/');
-    guid.push_str(&Uuid::now_v7().to_string());
-    bucket
-        .put_object_stream_with_content_type(bytes, &guid, "image/jpeg")
-        .await?;
-    bucket
-        .put_object_tagging(&guid, &[("time", &time.to_string())])
-        .await?;
-    Ok(guid)
-}
-
-async fn push_jpgs<'a, V: Iterator<Item = (&'a ImgRef<'a, [u8; 3]>, &'a DateTime<Utc>)>>(
-    data: V,
-    bucket: &Bucket,
-) -> anyhow::Result<Vec<String>> {
-    let mut buffer: Vec<u8> = vec![];
-    let mut collect: Vec<String> = vec![];
-    for item in data {
-        buffer = encode_jpg(buffer, *item.0)?; // encode into buffer and return same buf
-        collect.push(push_object(&mut buffer.as_slice(), item.1, bucket).await?);
-    }
-    Ok(collect)
 }

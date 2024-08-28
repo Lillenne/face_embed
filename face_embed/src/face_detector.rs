@@ -4,26 +4,6 @@ use std::num::NonZeroU32;
 use ndarray::{prelude::*, Array4, ArrayView2, Dim, ViewRepr};
 use ort::Session;
 
-pub trait ModelDims {
-    /// Returns the model dimensions (b,c,h,w)
-    fn dims(&self) -> (NonZeroU32, NonZeroU32, NonZeroU32, NonZeroU32);
-}
-
-/// Defines a face detection algorithm
-pub trait FaceDetector: ModelDims {
-    /// Detects faces in an RGB image.
-    fn detect(&self, frame: &[u8]) -> anyhow::Result<Vec<DetectedObject>>;
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DetectedObject {
-    /// The index of the output class with the highest probability
-    pub class: usize,
-    /// The predicted likelihood
-    pub confidence: f32,
-    pub bounding_box: Rect,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct UltrafaceDetectorConfig {
     pub iou_threshold: ZeroToOneF32,
