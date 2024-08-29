@@ -1,11 +1,12 @@
-use std::{borrow::Borrow, fmt::Display, io::Cursor, num::NonZeroU32, time::Instant};
+use std::{io::Cursor, num::NonZeroU32, time::Instant};
 
 use crate::{
     cache::SlidingVectorCache,
     db::{Database, EmbeddingTime, User},
     messaging::{DetectionEvent, LabelEvent, Messenger},
-    EmbeddingGenerator, FaceDetector, ModelDims,
+    EmbeddingGenerator, FaceDetector,
 };
+use anyhow::bail;
 use chrono::{DateTime, Utc};
 use fast_image_resize as fr;
 use fr::{CropBox, DynamicImageView};
@@ -202,18 +203,24 @@ impl LivePublisher {
         let mut guid = String::new();
         guid.push('/');
         guid.push_str(&Uuid::now_v7().to_string());
-        &self
+        let status = &self
             .bucket
             .put_object_stream_with_content_type(bytes, &guid, "image/jpeg")
             .await?;
-        &self
+        if let 200 | 201 = *status {
+            bail!("Failed to put object")
+        }
+        let status = &self
             .bucket
             .put_object_tagging(
                 &guid,
                 &[("time", &time.to_string()), ("embed", &self.generator_tag)],
             )
             .await?;
-        Ok(guid)
+        match status.status_code() {
+            200 | 201 => Ok(guid),
+            _ => bail!("Failed to put metadata"),
+        }
     }
 
     /// Encodes images as JPG and pushes them to storage with new guids & timestamp tags
@@ -386,7 +393,7 @@ fn create_embedding(
             let embedding = pgvector::Vector::from(embedding);
             Ok(EmbeddingTime { embedding, time })
         }
-        Err(e) => Err(PublisherError::EmbedderError(e))
+        Err(e) => Err(PublisherError::EmbedderError(e)),
     }
 }
 

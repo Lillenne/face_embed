@@ -7,13 +7,9 @@ use face_embed::pipeline::{bytes_as_imgref, get_embedder_inputs, LivePublisher, 
 use face_embed::storage::get_or_create_bucket;
 use face_embed::{FaceDetector, ModelDims};
 use futures_lite::stream::StreamExt;
-use image::codecs::jpeg::JpegDecoder;
-use image::{EncodableLayout, ImageDecoder, ImageReader};
-use lapin::options::{BasicConsumeOptions, QueueDeclareOptions};
-use lapin::protocol::connection;
-use lapin::Channel;
+use image::{EncodableLayout, ImageReader};
+use lapin::Connection;
 use lapin::{options::BasicAckOptions, ConnectionProperties};
-use lapin::{types::FieldTable, Connection};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{
     message::{header::ContentType, Mailbox},
@@ -21,7 +17,7 @@ use lettre::{
 };
 use lettre::{Message, SmtpTransport};
 use mini_moka::sync::Cache;
-use std::io::{BufRead, Cursor};
+use std::io::Cursor;
 use std::num::NonZeroU32;
 use std::{env::var, time::Duration};
 use tracing::{error, info, trace, warn, Instrument};
@@ -38,7 +34,7 @@ const ULTRAFACE_PATH: &str = "../models/ultraface-int8.onnx";
 #[derive(Parser, Debug)]
 pub struct EmbedArgs {
     /// The path to the ultraface detection model.
-    #[arg(short, long, default_value = ULTRAFACE_PATH, value_parser = path_parser, env)]
+    #[arg(long, default_value = ULTRAFACE_PATH, value_parser = path_parser, env)]
     detector_path: String,
 
     /// The path to the arface embedding model.
@@ -57,6 +53,9 @@ pub struct EmbedArgs {
 
     #[command(flatten)]
     storage: S3Args,
+
+    #[command(flatten)]
+    message_bus: MessageBusArgs,
 }
 
 #[derive(Args, Debug)]
@@ -78,37 +77,67 @@ pub(crate) struct S3Args {
     s3_capture_bucket: String,
 }
 
+#[derive(Args, Debug)]
+pub(crate) struct MessageBusArgs {
+    /// The publishing address of the amqp message bus.
+    #[arg(short, long, env)]
+    bus_address: String,
+
+    /// The name of the message bus queue to publish to.
+    #[arg(short, long, env)]
+    capture_queue_name: String,
+
+    /// The name of the message bus queue to publish to.
+    #[arg(long, env)]
+    detection_queue_name: String,
+
+    /// The name of the message bus queue to publish to.
+    #[arg(long, env)]
+    sign_up_queue_name: String,
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
     let args = EmbedArgs::parse();
-    let addr = var("BUS_ADDRESS")?;
-    let capture_queue_name = var("CAPTURE_QUEUE_NAME")?;
-    let detection_queue_name = var("DETECTION_QUEUE_NAME")?;
 
     info!("Initializing sign-up message bus connection...");
-    let conn = Connection::connect(&addr, ConnectionProperties::default()).await?;
+    let conn = Connection::connect(
+        &args.message_bus.bus_address,
+        ConnectionProperties::default(),
+    )
+    .await?;
 
-    let sign_up = Messenger::new_channel(&conn, var("SIGN_UP_QUEUE_NAME")?).await?;
+    let sign_up =
+        Messenger::new_channel(&conn, args.message_bus.sign_up_queue_name.clone()).await?;
     sign_up.queue_declare().await?;
     info!("Connection initialized.");
-    let sign = tokio::spawn(async move {
-        let _ = consume_sign_up_events(sign_up, args.similarity_threshold).await;
-    });
+    let conn_str = args.db_conn_str.clone();
+    let sign = tokio::spawn(
+        async move {
+            let _ = consume_sign_up_events(sign_up, args.similarity_threshold, conn_str).await;
+        }
+        .instrument(tracing::error_span!("Sign-ups")),
+    );
 
     info!("Initializing capture processing message bus connection...");
-    let capture_channel = Messenger::new_channel(&conn, capture_queue_name).await?;
+    let capture_channel =
+        Messenger::new_channel(&conn, args.message_bus.capture_queue_name.clone()).await?;
     capture_channel.queue_declare().await?;
     info!("Connection initialized.");
 
     info!("Initializing detection message bus connection...");
-    let detection_channel = Messenger::new_channel(&conn, detection_queue_name).await?;
+    let detection_channel =
+        Messenger::new_channel(&conn, args.message_bus.detection_queue_name.clone()).await?;
     detection_channel.queue_declare().await?;
     info!("Connection initialized.");
-    let capture = tokio::spawn(async move {
-        let _ = consume_capture_events(args, capture_channel, detection_channel).await;
-    });
-    // sign.await?;
+    let capture = tokio::spawn(
+        async move {
+            let _ = consume_capture_events(args, capture_channel, detection_channel).await;
+        }
+        .instrument(tracing::error_span!("Capture-Processing")),
+    );
+    sign.await?;
     capture.await?;
     Ok(())
 }
@@ -267,8 +296,12 @@ async fn consume_detection_events(messenger: Messenger) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn consume_sign_up_events(messenger: Messenger, threshold: f32) -> anyhow::Result<()> {
-    let db = Database::new(var("DB_CONN_STR")?.as_str(), 5).await?;
+async fn consume_sign_up_events(
+    messenger: Messenger,
+    threshold: f32,
+    db_conn_str: String,
+) -> anyhow::Result<()> {
+    let db = Database::new(db_conn_str.as_str(), 5).await?;
     let mut consumer = messenger.get_consumer("sign-up-consumer").await?;
 
     while let Some(Ok(delivery)) = consumer.next().await {

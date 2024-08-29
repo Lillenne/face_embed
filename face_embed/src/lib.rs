@@ -1,20 +1,27 @@
 pub mod cache;
 pub mod db;
-#[cfg(feature = "ort")]
 pub mod embedding;
-#[cfg(feature = "ort")]
 pub mod face_detector;
 pub mod image_utils;
 pub mod messaging;
 pub mod path_utils;
 pub mod pipeline;
 pub mod storage;
-use std::num::NonZeroU32;
 
-use fast_image_resize as fr;
+#[cfg(feature = "tract")]
+pub mod tract_backend;
 
 #[cfg(feature = "ort")]
 pub use ort;
+
+#[cfg(feature = "ort")]
+mod ort_backend;
+
+use fast_image_resize as fr;
+use std::num::NonZeroU32;
+
+#[cfg(all(feature = "tract", feature = "ort"))]
+compile_error!("feature \"tract\" and feature \"ort\" cannot be enabled at the same time");
 
 pub trait ModelDims {
     /// Returns the model dimensions (b,c,h,w)
