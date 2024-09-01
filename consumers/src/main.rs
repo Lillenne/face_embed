@@ -108,6 +108,13 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
+    info!("Initializing detection message bus connection...");
+    let detection_channel =
+        Messenger::new_channel(&conn, args.message_bus.detection_queue_name.clone()).await?;
+    detection_channel.queue_declare().await?;
+    let detection_clone = detection_channel.clone();
+    info!("Connection initialized.");
+
     let sign_up =
         Messenger::new_channel(&conn, args.message_bus.sign_up_queue_name.clone()).await?;
     sign_up.queue_declare().await?;
@@ -115,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
     let conn_str = args.db_conn_str.clone();
     let sign = tokio::spawn(
         async move {
-            let _ = consume_sign_up_events(sign_up, args.similarity_threshold, conn_str).await;
+            let _ = consume_sign_up_events(sign_up, args.similarity_threshold, conn_str, detection_clone).await;
         }
         .instrument(tracing::error_span!("Sign-ups")),
     );
@@ -126,11 +133,6 @@ async fn main() -> anyhow::Result<()> {
     capture_channel.queue_declare().await?;
     info!("Connection initialized.");
 
-    info!("Initializing detection message bus connection...");
-    let detection_channel =
-        Messenger::new_channel(&conn, args.message_bus.detection_queue_name.clone()).await?;
-    detection_channel.queue_declare().await?;
-    info!("Connection initialized.");
     let capture = tokio::spawn(
         async move {
             let _ = consume_capture_events(args, capture_channel, detection_channel).await;
@@ -300,10 +302,14 @@ async fn consume_sign_up_events(
     messenger: Messenger,
     threshold: f32,
     db_conn_str: String,
+    publish: Messenger,
 ) -> anyhow::Result<()> {
+    info!("Connecting to db...");
     let db = Database::new(db_conn_str.as_str(), 5).await?;
+    info!("Initializing message consumer...");
     let mut consumer = messenger.get_consumer("sign-up-consumer").await?;
 
+    info!("Processing sign-up messages...");
     while let Some(Ok(delivery)) = consumer.next().await {
         let data: LabelEvent = serde_json::from_slice(delivery.data.as_slice())?;
         info!(
@@ -319,10 +325,13 @@ async fn consume_sign_up_events(
             );
             for event in events {
                 let ser = serde_json::to_vec_pretty(&event)?;
-                messenger.publish(ser.as_slice()).await?;
+                publish.publish(ser.as_slice()).await?;
             }
+        } else {
+            info!("Found no previous detections of user");
         }
         delivery.ack(BasicAckOptions::default()).await?;
     }
+    info!("End processing sign-up messages.");
     Ok(())
 }
