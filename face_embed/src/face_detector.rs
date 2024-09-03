@@ -27,3 +27,8 @@ impl Default for UltrafaceDetectorConfig {
         }
     }
 }
+
+pub const ULTRAFACE_MEAN: f32 = 127.0;
+pub const ULTRAFACE_DIV: f32 = 128.0;
+pub const ULTRAFACE_N_BOXES: usize = 4420;
+pub const ULTRAFACE_FG_IDX: usize = 1;

@@ -13,7 +13,7 @@ use face_embed::{
     face_detector::UltrafaceDetector,
     messaging::Messenger,
     pipeline::LabelPublisher,
-    storage::get_or_create_bucket
+    storage::get_or_create_bucket,
 };
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
@@ -25,11 +25,15 @@ async fn main() -> BoxResult<()> {
     tracing_subscriber::fmt::init();
 
     let detector = UltrafaceDetector::new(Default::default(), &var("DETECTOR_PATH")?)?;
+    info!("Created face detector...");
     let generator = ArcFace::new(&var("EMBEDDER_PATH")?)?;
+    info!("Created embedder...");
     let detector = Box::new(detector);
     let messenger =
-        Messenger::new_connection(&var("BUS_ADDRESS")?, var("SIGN_UP_QUEUE_NAME")?).await?;
-    let db = Database::new(&var("DB_CONN_STR")?, var("DB_MAX_CONNS")?.parse::<u32>()?).await?;
+        Messenger::new_connection(&var("BUS_ADDRESS")?, var("SIGN_UP_QUEUE_NAME").expect("queue name")).await?;
+    info!("Created messenger...");
+    let db = Database::new(&var("DB_CONN_STR")?, var("DB_MAX_CONNS").unwrap_or("5".into()).parse::<u32>()?).await?;
+    info!("Created database...");
     let bucket = get_or_create_bucket(
         &var("S3_SIGN_UP_BUCKET")?,
         var("S3_URL")?,
@@ -37,6 +41,7 @@ async fn main() -> BoxResult<()> {
         &var("S3_SECRET_KEY")?,
     )
     .await?;
+    info!("Created bucket...");
     let publisher = Arc::new(LabelPublisher::new(
         detector,
         Box::new(generator),
@@ -52,6 +57,7 @@ async fn main() -> BoxResult<()> {
         .route("/upload", post(sign_up))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024 /* 10 mb */))
         .with_state(state);
+    info!("Created app...");
 
     let addr = std::env::var("BACKEND_ADDRESS").unwrap_or("127.0.0.1:3000".to_owned());
     let listener = TcpListener::bind(addr).await?;

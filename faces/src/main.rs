@@ -1,3 +1,5 @@
+use std::iter::SkipWhile;
+
 use clap::{arg, Args, Parser};
 use face_embed::path_utils::path_parser;
 use signal_hook::consts::*;
@@ -8,7 +10,7 @@ use sqlx::types::chrono;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, Instrument};
 
 mod embed;
 

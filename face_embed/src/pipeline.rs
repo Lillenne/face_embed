@@ -131,7 +131,6 @@ impl LivePublisher {
         embedding: EmbeddingTime,
     ) -> anyhow::Result<()> {
         let path = self.push_jpg(data, &embedding.time).await?;
-        // TODO single query
         let id = self
             .database
             .save_captured_embedding_to_db(&embedding)
@@ -170,7 +169,6 @@ impl LivePublisher {
         let paths = self
             .push_jpgs(imgs.iter().zip(data.iter().map(|et| &et.time)))
             .await?;
-        // TODO single query
         let ids = self.database.save_captured_embeddings_to_db(data).await?;
         for ((id, time), path) in ids.into_iter().zip(paths) {
             let user = self

@@ -8,6 +8,9 @@ pub mod path_utils;
 pub mod pipeline;
 pub mod storage;
 
+#[cfg(feature = "opencv")]
+pub mod opencv_backend;
+
 #[cfg(feature = "tract")]
 pub mod tract_backend;
 

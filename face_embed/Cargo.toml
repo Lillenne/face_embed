@@ -31,14 +31,16 @@ bytemuck = "1.15.0"
 async-trait = "0.1.80"
 serde_json = "1.0.127"
 ort = { version = "2.0.0-rc.1", optional = true }
-tract-onnx = { version= "0.21.1", optional = true }
+tract-onnx = { version = "0.21.1", optional = true }
+opencv = { version = "0.92.0", features = ["clang-runtime"], optional = true }
 
 [dependencies.rust-s3]
-version = "0.33.0"
+version = "0.35.1"
 default-features = false
 features = ["tokio-rustls-tls"]
 
 [features]
-default = []
+default = ["opencv"]
 ort = ["dep:ort"]
 tract = ["dep:tract-onnx"]
+opencv = ["dep:opencv"]
