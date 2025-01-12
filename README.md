@@ -16,11 +16,9 @@ Perform person identification and perform the appropriate response action, allow
 
 My first use case is to tackle a personal problem of mine (not signing in at the gym) by automatically detecting myself on gym security camera footage and sending an API request. Eventually, this may be extended to other users easily via an opt-in approach, where a user may _e.g._, supply an image of themselves which may then be used to generate their reference embedding and automatically determine classes they attend--even retroactively.
 
+### Application Workflow
 ```mermaid
 %%{ init: {"theme": "dark"} }%%
----
-title: Application Workflow
----
 flowchart
     subgraph Detection
     ce[fa:fa-person Client Enters] --> fd[fa:fa-camera Detect Face]
